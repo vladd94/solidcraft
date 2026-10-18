@@ -371,6 +371,111 @@ fn thread_groove(t: &ThreadInfo, radius: f64, open: (bool, bool)) -> Result<soli
     Ok(kernel::sweep_helix_mesh(&plane, &section, base, k, p, (s1 - s0) / p, 48)?)
 }
 
+/// Shaded cosmetic thread just inside a hole or just outside a shaft. One pitch is a narrow
+/// crest and two flanks that meet the next turn, so the wall reads as a thread rather than a
+/// stripe on the plain cylinder. The body is not cut. Empty when the thread has no usable axis.
+pub fn cosmetic_thread_mesh(t: &ThreadInfo) -> solidcraft_geom::Mesh {
+    let mut mesh = solidcraft_geom::Mesh::default();
+    let len = t.end - t.start;
+    let wall = if t.internal { (t.major_diameter - t.pitch) * 0.5 } else { t.major_diameter * 0.5 };
+    // Keep the whole form on the visible side of the cylinder so the solid face does not hide it.
+    let inset = (t.pitch * 0.04).clamp(0.02, 0.08);
+    let depth = (t.pitch * 0.541).min(wall * 0.45);
+    let crest_r = if t.internal { wall - inset - depth } else { wall + inset };
+    let root_r = if t.internal { wall - inset } else { (wall + inset - depth).max(wall * 0.2) };
+    let crest_half = t.pitch * 0.125;
+    let pitch_half = t.pitch * 0.5;
+    if !(len > 1e-6 && t.pitch > 1e-3 && wall > 1e-6 && crest_r > 1e-6 && root_r > 1e-6 && t.axis.is_finite() && t.axis_point.is_finite()) {
+        return mesh;
+    }
+    let Some(k) = t.axis.normalized() else { return mesh };
+    let u = k.any_perp();
+    let v = k.cross(u);
+    let steps = ((len / t.pitch * 48.0).ceil() as usize).clamp(24, 4_096);
+    let place = |s: f64, radial: f64, axial: f64| {
+        let along = (s + axial).clamp(t.start, t.end);
+        let ang = (s - t.start) / t.pitch * std::f64::consts::TAU;
+        t.axis_point + k * along + (u * ang.cos() + v * ang.sin()) * radial
+    };
+    for i in 0..steps {
+        let s0 = t.start + len * (i as f64) / (steps as f64);
+        let s1 = t.start + len * ((i + 1) as f64) / (steps as f64);
+        let (a0, b0, c0, d0, a1, b1, c1, d1) = {
+            let mut ring = |s: f64| {
+                (
+                    cosmetic_vertex(&mut mesh, place(s, root_r, -pitch_half)),
+                    cosmetic_vertex(&mut mesh, place(s, crest_r, -crest_half)),
+                    cosmetic_vertex(&mut mesh, place(s, crest_r, crest_half)),
+                    cosmetic_vertex(&mut mesh, place(s, root_r, pitch_half)),
+                )
+            };
+            let r0 = ring(s0);
+            let r1 = ring(s1);
+            (r0.0, r0.1, r0.2, r0.3, r1.0, r1.1, r1.2, r1.3)
+        };
+        for (p, q, r, s) in [(a0, b0, a1, b1), (b0, c0, b1, c1), (c0, d0, c1, d1)] {
+            cosmetic_face(&mut mesh, t.internal, t.axis_point, k, p, q, r);
+            cosmetic_face(&mut mesh, t.internal, t.axis_point, k, q, s, r);
+        }
+    }
+    for n in &mut mesh.normals {
+        if let Some(u) = n.normalized() {
+            *n = u;
+        }
+    }
+    mesh
+}
+
+fn cosmetic_vertex(mesh: &mut solidcraft_geom::Mesh, p: Vec3) -> u32 {
+    let i = mesh.positions.len() as u32;
+    mesh.positions.push(p);
+    mesh.normals.push(Vec3::ZERO);
+    i
+}
+
+fn cosmetic_face(mesh: &mut solidcraft_geom::Mesh, internal: bool, axis_point: Vec3, axis: Vec3, a: u32, b: u32, c: u32) {
+    let (Some(pa), Some(pb), Some(pc)) =
+        (mesh.positions.get(a as usize).copied(), mesh.positions.get(b as usize).copied(), mesh.positions.get(c as usize).copied())
+    else {
+        return;
+    };
+    let Some(mut n) = (pb - pa).cross(pc - pa).normalized() else { return };
+    let mid = (pa + pb + pc) / 3.0 - axis_point;
+    let outward = mid - axis * mid.dot(axis);
+    if internal == (n.dot(outward) > 0.0) {
+        n = -n;
+        mesh.triangles.push([a, c, b]);
+    } else {
+        mesh.triangles.push([a, b, c]);
+    }
+    for i in [a, b, c] {
+        if let Some(slot) = mesh.normals.get_mut(i as usize) {
+            *slot = *slot + n;
+        }
+    }
+}
+
+/// Cut a modelled thread's groove out of its body. `on_face` is a point on the cylindrical face.
+fn cut_modeled_thread(st: &mut ModelState, t: &ThreadInfo, on_face: Vec3) -> Result<()> {
+    let i = st.bodies.iter().position(|b| b.name == t.body).ok_or_else(|| DocError::Invalid("threaded body".into()))?;
+    let Some(mb) = st.bodies.get(i).cloned() else { return Err(DocError::Invalid("body".into())) };
+    let cyl = kernel::cylinder_face_at(&mb.body, on_face).ok_or_else(|| DocError::Invalid("no cylindrical face there to thread".into()))?;
+    let tol = t.pitch * 1e-3;
+    let groove = thread_groove(t, cyl.radius, ((t.start - cyl.start).abs() < tol, (t.end - cyl.end).abs() < tol))?;
+    // The B-rep boolean can't take helical walls in reasonable time: the body is cut
+    // faceted (curved faces within a two-hundredth of the pitch).
+    let nb = kernel::faceted_boolean(&mb.body, &groove, BoolOp::Cut, t.pitch * 0.005)?
+        .ok_or_else(|| DocError::Invalid("the thread removed everything".into()))?;
+    // The groove's faces are its triangles, with no role to name them by.
+    let groove = crate::lineage::Lineage::unnamed_faces(groove.triangles.len());
+    let lineage = mb.traced().lineage.and_then(|l| crate::lineage::Lineage::step(&nb, &[&l, &groove]));
+    let nb = Traced { body: nb, lineage };
+    if let Some(slot) = st.bodies.get_mut(i) {
+        *slot = ModelBody::traced_new(mb.name, nb, mb.feature);
+    }
+    Ok(())
+}
+
 /// A constant fillet of `edges`; with [`FilletFit::Reduce`](crate::FilletFit::Reduce), a radius too
 /// large for the geometry around them is reduced where it doesn't fit, to the largest that works
 /// for each group of edges sharing a face; the radius per edge is returned. With
@@ -4819,7 +4924,7 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
             }
             apply_traced(st, f, tools, *operation, &crate::plain(targets))
         }
-        FeatureKind::Hole { thread, diameter, .. } => {
+        FeatureKind::Hole { thread, diameter, modeled, .. } => {
             let (spots, dir) = hole_spots(vals, st, f)?;
             let tools = hole_feature_tools(vals, st, f)?;
             let handled = sheet_hole_cut(st, f, &tools, warning)?;
@@ -4835,7 +4940,11 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
                 for p in spots {
                     let wall = p + dir.any_perp() * r + dir * (r * 0.5);
                     let t = thread_on(st, f.id, wall, Some(d), None)?;
-                    st.threads.push(t);
+                    if *modeled {
+                        cut_modeled_thread(st, &t, wall)?;
+                    } else {
+                        st.threads.push(t);
+                    }
                 }
             }
             Ok(())
@@ -4850,23 +4959,7 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
                 st.threads.push(t);
                 return Ok(());
             }
-            let i = st.bodies.iter().position(|b| b.name == t.body).ok_or_else(|| DocError::Invalid("threaded body".into()))?;
-            let Some(mb) = st.bodies.get(i).cloned() else { return Err(DocError::Invalid("body".into())) };
-            let cyl = kernel::cylinder_face_at(&mb.body, face.0).ok_or_else(|| DocError::Invalid("no cylindrical face there to thread".into()))?;
-            let tol = t.pitch * 1e-3;
-            let groove = thread_groove(&t, cyl.radius, ((t.start - cyl.start).abs() < tol, (t.end - cyl.end).abs() < tol))?;
-            // The B-rep boolean can't take helical walls in reasonable time: the body is cut
-            // faceted (curved faces within a two-hundredth of the pitch).
-            let nb = kernel::faceted_boolean(&mb.body, &groove, BoolOp::Cut, t.pitch * 0.005)?
-                .ok_or_else(|| DocError::Invalid("the thread removed everything".into()))?;
-            // The groove's faces are its triangles, with no role to name them by.
-            let groove = crate::lineage::Lineage::unnamed_faces(groove.triangles.len());
-            let lineage = mb.traced().lineage.and_then(|l| crate::lineage::Lineage::step(&nb, &[&l, &groove]));
-            let nb = Traced { body: nb, lineage };
-            if let Some(slot) = st.bodies.get_mut(i) {
-                *slot = ModelBody::traced_new(mb.name, nb, mb.feature);
-            }
-            Ok(())
+            cut_modeled_thread(st, &t, face.0)
         }
         FeatureKind::Shell { faces, thickness, body, direction, tangent_chain } => {
             let t = val(vals, thickness, Kind::Length)?;

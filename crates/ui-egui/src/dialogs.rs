@@ -302,14 +302,16 @@ pub struct HoleOpts {
     /// Drill point: an angled tip instead of a flat bottom.
     pub angled: bool,
     pub tip_angle: String,
-    /// Tap type: tapped (a cosmetic thread) instead of simple.
+    /// Tap type: tapped instead of simple.
     pub tapped: bool,
     pub thread: String,
+    /// Cut the helical profile. Off for a new tap; an edited hole keeps what it saved.
+    pub modeled: bool,
 }
 
 impl Default for HoleOpts {
     fn default() -> Self {
-        HoleOpts { multiple: false, all: false, angled: true, tip_angle: "118 deg".into(), tapped: false, thread: "M5".into() }
+        HoleOpts { multiple: false, all: false, angled: true, tip_angle: "118 deg".into(), tapped: false, thread: "M5".into(), modeled: false }
     }
 }
 
@@ -2924,9 +2926,16 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                         row_label(ui, "Hole Tap Type");
                         let mut tap = usize::from(opts.tapped);
                         combo(ui, "hole_tap", &["Simple", "Tapped"], &mut tap);
-                        opts.tapped = tap == 1;
+                        let tapped = tap == 1;
+                        if opts.tapped && !tapped {
+                            opts.modeled = false;
+                        }
+                        opts.tapped = tapped;
                         ui.end_row();
                         if opts.tapped {
+                            row_label(ui, "Modeled");
+                            ui.checkbox(&mut opts.modeled, "Cut the thread");
+                            ui.end_row();
                             row_label(ui, "Size");
                             let r = ui.add(egui::TextEdit::singleline(&mut opts.thread).hint_text("M5"));
                             enter |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -4275,6 +4284,9 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
                 }
                 if opts.tapped && !opts.thread.trim().is_empty() {
                     params["thread"] = json!(opts.thread.trim());
+                    if opts.modeled {
+                        params["modeled"] = json!(true);
+                    }
                 }
                 match *kind {
                     1 => {
@@ -4863,7 +4875,7 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
             d.extra.insert("pull".into(), pt3(pull.0));
             d
         }
-        FeatureKind::Hole { position, at, direction, diameter, depth, hole, points, thread, to } => {
+        FeatureKind::Hole { position, at, direction, diameter, depth, hole, points, thread, modeled, to } => {
             let mut d = start("solid.hole")?;
             let mut k = hole_defaults();
             if let Kind::Hole { diameter: dia, depth: dep, kind, cb_diameter, cb_depth, cs_diameter, cs_angle, opts } = &mut k {
@@ -4874,6 +4886,7 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
                 if let Some(th) = thread {
                     opts.tapped = true;
                     opts.thread = th.clone();
+                    opts.modeled = *modeled;
                 }
                 if let Some(dd) = depth {
                     *dep = dd.to_string();
