@@ -307,11 +307,22 @@ pub struct HoleOpts {
     pub thread: String,
     /// Cut the helical profile. Off for a new tap; an edited hole keeps what it saved.
     pub modeled: bool,
+    /// The tap-drill diameter was typed by the user; changing the thread size leaves it alone.
+    pub tap_diameter_override: bool,
 }
 
 impl Default for HoleOpts {
     fn default() -> Self {
-        HoleOpts { multiple: false, all: false, angled: true, tip_angle: "118 deg".into(), tapped: false, thread: "M5".into(), modeled: false }
+        HoleOpts {
+            multiple: false,
+            all: false,
+            angled: true,
+            tip_angle: "118 deg".into(),
+            tapped: false,
+            thread: "M5".into(),
+            modeled: false,
+            tap_diameter_override: false,
+        }
     }
 }
 
@@ -2929,6 +2940,11 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                         let tapped = tap == 1;
                         if opts.tapped && !tapped {
                             opts.modeled = false;
+                            opts.tap_diameter_override = false;
+                        }
+                        if !opts.tapped && tapped {
+                            opts.tap_diameter_override = false;
+                            sync_tapped_hole_diameter(diameter, &opts.thread);
                         }
                         opts.tapped = tapped;
                         ui.end_row();
@@ -2937,9 +2953,18 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                             ui.checkbox(&mut opts.modeled, "Cut the thread");
                             ui.end_row();
                             row_label(ui, "Size");
+                            let before = opts.thread.clone();
                             let r = ui.add(egui::TextEdit::singleline(&mut opts.thread).hint_text("M5"));
                             enter |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            if opts.thread != before && !opts.tap_diameter_override {
+                                sync_tapped_hole_diameter(diameter, &opts.thread);
+                            }
                             ui.end_row();
+                            if let Some((major, _)) = solidcraft_engine::doc::parse_metric_thread(&opts.thread) {
+                                row_label(ui, "Nominal Diameter");
+                                ui.label(format!("{} mm", show_thread_mm(major)));
+                                ui.end_row();
+                            }
                         }
                         if *kind == 0 {
                             row_label(ui, "Drill Point");
@@ -2958,8 +2983,12 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                             enter |= field(ui, &mut opts.tip_angle);
                             ui.end_row();
                         }
-                        row_label(ui, "Diameter");
+                        row_label(ui, if opts.tapped { "Tap-Drill Diameter" } else { "Diameter" });
+                        let before = diameter.clone();
                         enter |= field(ui, diameter);
+                        if opts.tapped && *diameter != before {
+                            opts.tap_diameter_override = true;
+                        }
                         ui.end_row();
                         if *kind == 1 {
                             row_label(ui, "Counterbore Ø");
@@ -3428,6 +3457,23 @@ fn hole_defaults() -> Kind {
         cs_diameter: "10 mm".into(),
         cs_angle: "90 deg".into(),
         opts: HoleOpts::default(),
+    }
+}
+
+/// A metric length as the Hole dialog shows it ("4.2 mm", "5 mm").
+fn show_thread_mm(mm: f64) -> String {
+    if (mm - mm.round()).abs() < 1e-9 {
+        format!("{}", mm.round())
+    } else {
+        format!("{mm}")
+    }
+}
+
+/// Fill the Hole diameter field with the conventional tap drill for `thread`.
+pub(crate) fn sync_tapped_hole_diameter(diameter: &mut String, thread: &str) {
+    if let Some((major, pitch)) = solidcraft_engine::doc::parse_metric_thread(thread) {
+        let drill = solidcraft_engine::doc::tap_drill_diameter(major, pitch);
+        *diameter = format!("{} mm", show_thread_mm(drill));
     }
 }
 
@@ -4887,6 +4933,14 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
                     opts.tapped = true;
                     opts.thread = th.clone();
                     opts.modeled = *modeled;
+                    // A stored bore that is not the conventional tap drill is an explicit override.
+                    if let Some((major, pitch)) = solidcraft_engine::doc::parse_metric_thread(th) {
+                        let drill = solidcraft_engine::doc::tap_drill_diameter(major, pitch);
+                        let want_mm = format!("{} mm", show_thread_mm(drill));
+                        let want_bare = show_thread_mm(drill);
+                        let got = dia.trim();
+                        opts.tap_diameter_override = got != want_mm && got != want_bare;
+                    }
                 }
                 if let Some(dd) = depth {
                     *dep = dd.to_string();

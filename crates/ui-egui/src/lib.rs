@@ -54,6 +54,8 @@ pub mod help;
 mod hole_direction_ui_tests;
 #[cfg(test)]
 mod hole_placement_ui_tests;
+#[cfg(test)]
+mod hole_tap_drill_ui_tests;
 pub mod home;
 pub mod i18n;
 #[cfg(test)]

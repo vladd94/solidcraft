@@ -217,6 +217,35 @@ pub fn metric_thread_sizes() -> &'static [(f64, f64)] {
     &ISO_COARSE
 }
 
+/// Conventional cutting-tap drill diameters (mm) for common ISO metric coarse pairs:
+/// `(nominal, pitch, tap_drill)`. These are manufacturing defaults, not `nominal − pitch`.
+const TAP_DRILL: &[(f64, f64, f64)] = &[
+    (3.0, 0.5, 2.5),
+    (4.0, 0.7, 3.3),
+    (5.0, 0.8, 4.2),
+    (6.0, 1.0, 5.0),
+    (8.0, 1.25, 6.8),
+    (10.0, 1.5, 8.5),
+    (12.0, 1.75, 10.2),
+    (16.0, 2.0, 14.0),
+    (20.0, 2.5, 17.5),
+];
+
+/// Conventional tap-drill rows `(nominal, pitch, tap_drill)` in millimetres.
+pub fn conventional_tap_drills() -> &'static [(f64, f64, f64)] {
+    TAP_DRILL
+}
+
+/// Pilot-hole diameter (mm) for a cutting tap of this metric size. Known coarse pairs use the
+/// conventional drill chart; anything else falls back to `major − pitch`.
+pub fn tap_drill_diameter(major: f64, pitch: f64) -> f64 {
+    TAP_DRILL
+        .iter()
+        .find(|(n, p, _)| (n - major).abs() < 1e-9 && (p - pitch).abs() < 1e-9)
+        .map(|(_, _, d)| *d)
+        .unwrap_or(major - pitch)
+}
+
 /// "M8" or "M8x1" → (nominal diameter, pitch).
 pub fn parse_metric_thread(s: &str) -> Option<(f64, f64)> {
     let t = s.trim().to_ascii_uppercase();
@@ -233,11 +262,11 @@ pub fn parse_metric_thread(s: &str) -> Option<(f64, f64)> {
 }
 
 /// The metric thread a cylinder of this diameter takes: a shaft is the major diameter, a hole
-/// the tap drill (major − pitch).
+/// the conventional tap drill.
 fn thread_for(diameter: f64, internal: bool) -> Option<(f64, f64)> {
     ISO_COARSE
         .iter()
-        .map(|&(n, p)| (n, p, if internal { n - p } else { n }))
+        .map(|&(n, p)| (n, p, if internal { tap_drill_diameter(n, p) } else { n }))
         .min_by(|a, b| (a.2 - diameter).abs().total_cmp(&(b.2 - diameter).abs()))
         .filter(|(_, _, want)| (want - diameter).abs() <= 0.15 * diameter)
         .map(|(n, p, _)| (n, p))
@@ -337,7 +366,10 @@ fn thread_groove(t: &ThreadInfo, radius: f64, open: (bool, bool)) -> Result<soli
         let shown = show_mm(dia);
         return Err(DocError::Invalid(if t.internal {
             let alt = alt.map(|a| format!(", or thread this hole {a}")).unwrap_or_default();
-            format!("this {shown} mm hole is too wide for a modelled {m} thread: {cut}; drill {} mm for {m}{alt}", show_mm(d - p))
+            format!(
+                "this {shown} mm hole is too wide for a modelled {m} thread: {cut}; drill {} mm for {m}{alt}",
+                show_mm(tap_drill_diameter(d, p))
+            )
         } else {
             let alt = alt.map(|a| format!(", or thread this shaft {a}")).unwrap_or_default();
             format!("this {shown} mm shaft is too thin for a modelled {m} thread: {cut}; make the shaft {} mm for {m}{alt}", show_mm(d))

@@ -22,6 +22,30 @@ fn volume(s: &mut Session, b: &str) -> f64 {
 
 const SIZES: [(f64, f64); 9] = [(3.0, 0.5), (4.0, 0.7), (5.0, 0.8), (6.0, 1.0), (8.0, 1.25), (10.0, 1.5), (12.0, 1.75), (16.0, 2.0), (20.0, 2.5)];
 
+/// Conventional cutting-tap drills are chart values (M8 → 6.8 mm), not always major − pitch.
+#[test]
+fn tapped_holes_use_the_conventional_tap_drill_table() {
+    for (thread, want) in [("M3", 2.5), ("M4", 3.3), ("M5", 4.2), ("M6", 5.0), ("M8", 6.8), ("M10", 8.5)] {
+        let (major, pitch) = solidcraft_doc::parse_metric_thread(thread).unwrap();
+        let drill = solidcraft_doc::tap_drill_diameter(major, pitch);
+        assert!((drill - want).abs() < 1e-12, "{thread}: {drill} vs {want}");
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length": 20, "width": 20, "height": 8}));
+        run(&mut s, "solid.hole", json!({"position": [10.0, 10.0, 8.0], "thread": thread, "depth": 8}));
+        let f = s.doc.features.iter().rev().find(|f| matches!(f.kind, crate::doc::FeatureKind::Hole { .. })).unwrap();
+        let crate::doc::FeatureKind::Hole { diameter, .. } = &f.kind else { panic!("hole") };
+        let got: f64 = diameter.as_str().trim_end_matches(" mm").parse().unwrap();
+        assert!((got - want).abs() < 1e-9, "{thread}: stored diameter {diameter}");
+    }
+    // An explicit diameter still wins over the table.
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 20, "width": 20, "height": 8}));
+    run(&mut s, "solid.hole", json!({"position": [10.0, 10.0, 8.0], "thread": "M5", "diameter": 4.5, "depth": 8}));
+    let f = s.doc.features.last().unwrap();
+    let crate::doc::FeatureKind::Hole { diameter, .. } = &f.kind else { panic!("hole") };
+    assert_eq!(diameter.as_str(), "4.5");
+}
+
 #[test]
 fn non_finite_thread_designations_are_refused_without_changing_the_design() {
     let mut s = Session::default();

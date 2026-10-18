@@ -2577,7 +2577,7 @@ mod naming {
     }
 }
 
-/// Tapped holes take the tap drill (major − pitch); clearance holes the ISO 273 diameter.
+/// Tapped holes take the conventional tap drill; clearance holes the ISO 273 diameter.
 #[test]
 fn tapped_and_clearance_holes() {
     let mut s = Session::default();
