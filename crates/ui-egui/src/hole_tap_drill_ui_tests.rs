@@ -3,7 +3,7 @@
 
 use serde_json::json;
 use solidcraft_engine::doc::{FeatureKind, tap_drill_diameter};
-use solidcraft_geom::Vec3;
+use solidcraft_engine::geom::Vec3;
 
 use crate::dialogs::{self, Kind};
 use crate::scenario::Harness;
@@ -51,7 +51,7 @@ fn tapped_m5_from_the_hole_dialog_drills_4_2_mm() {
     assert!(dia == "4.2 mm" || dia == "4.2", "stored bore is the tap drill, got {dia}");
     let st = h.app.session.world_state();
     let wall = Vec3::new(20.0 + 2.1, 25.0, 5.0);
-    let cyl = st.bodies.iter().find_map(|b| solidcraft_kernel::cylinder_face_at(&b.body, wall));
+    let cyl = st.bodies.iter().find_map(|b| solidcraft_engine::kernel::cylinder_face_at(&b.body, wall));
     let cyl = cyl.expect("the tapped hole leaves a cylinder of the tap-drill radius");
     assert!((cyl.radius * 2.0 - 4.2).abs() < 1e-6, "bore diameter {}", cyl.radius * 2.0);
 }
