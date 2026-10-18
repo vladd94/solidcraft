@@ -173,6 +173,21 @@ before the draft is verified.
   values never come from a commercial CAD product.
 - Build with `CARGO_TARGET_DIR=<repo>/target`. Windows: `cargo xwin build --release --target x86_64-pc-windows-msvc -p solidcraft`.
 
+## Cursor Cloud specific instructions
+
+The environment install selects Rust stable (1.95 or newer, with rustfmt, clippy, and the
+`wasm32-unknown-unknown` target) and puts `trunk` 0.21.14 on `PATH` for `apps/solidcraft-web`.
+The base image's Rust is older than `Cargo.toml`'s `rust-version`; trust `rustup show` after install.
+
+`start` runs Xvfb on display `:99` when that server is not already up (1600×1000). This desktop
+image also has display `:1`. Run the desktop app with `DISPLAY=:99` when `:1` is absent:
+`DISPLAY=:99 cargo run -p solidcraft -- --sample --control PORT`.
+
+Headless modeling does not need a display: `solidcraft-cli eval`, `run`, and `snapshot`.
+Mesa llvmpipe is the software Vulkan/OpenGL adapter (`solidcraft-cli gpu`). A libEGL `DRI3`
+warning under Xvfb or this desktop is expected; the app still selects Vulkan.
+`SOLIDCRAFT_GPU=cpu` forces the CPU rasterizer for snapshots.
+
 ## Roadmap
 `ROADMAP.md` (committed) tracks status, milestones and estimates. Update it whenever a
 milestone task lands. `docs/features.md` (SolidCraft's commands by area, from the registry) and
