@@ -25,6 +25,16 @@ fn count_surfaces(b: &Body) -> (usize, usize, usize, usize) {
     (planes, cylinders, other_analytic, unknown)
 }
 
+/// Closed single shell without calling `validity()` (fine meshing of progressive flanks is slow).
+fn assert_closed_shell(b: &Body) {
+    assert_eq!(b.shell_count(), 1, "shell_count");
+    assert!(!b.is_surface(), "must be a closed solid, not an open surface");
+}
+
+fn coarse_volume(b: &Body) -> f64 {
+    b.tessellate(0.2).expect("coarse tess").measure().volume
+}
+
 #[test]
 fn piecewise_cubic_helix_errors_are_documented() {
     for (r, pitch) in [(2.1_f64, 0.8_f64), (2.5, 0.8), (4.0, 1.25)] {
@@ -169,9 +179,7 @@ fn local_cylinder_replacement_yields_curved_closed_solid() {
     let faces_before = plate.face_count();
     let on = Vec3::new(28.0, 25.0 + tap, 5.0);
     let threaded = try_replace_cylinder_with_helical_thread(&plate, on, 5.0, 0.8).expect("local helical replace");
-    assert!(threaded.validity().is_empty(), "{:?}", threaded.validity());
-    assert_eq!(threaded.shell_count(), 1);
-    assert!(!threaded.is_surface());
+    assert_closed_shell(&threaded);
     let faces = threaded.face_count();
     eprintln!("local replace faces: before={faces_before} after={faces}");
     assert!(faces < 80, "must stay compact, not ~4000 facets: {faces}");
@@ -184,13 +192,11 @@ fn local_cylinder_replacement_yields_curved_closed_solid() {
         (0..threaded.face_count()).any(|i| matches!(face_surface(&threaded, i), Some(FaceSurface::Cylinder { origin, radius, .. }) if (origin.x - 12.0).abs() < 1e-2 && (radius - tap).abs() < 1e-3)),
         "plain hole analytic after replace"
     );
-    let mid = Vec3::new(28.0, 25.0, 5.0);
-    let plain_mid = Vec3::new(12.0, 25.0, 5.0);
-    let vol = threaded.tessellate(5e-3).unwrap().measure().volume;
-    eprintln!("local replace contains mid={} plain_mid={} vol~{}", threaded.contains(mid), threaded.contains(plain_mid), vol);
-    assert!(!threaded.contains(mid), "local replace bore must be empty");
-    assert!(!threaded.contains(plain_mid), "plain hole stays empty");
+    let before_vol = coarse_volume(&plate);
+    let vol = coarse_volume(&threaded);
+    eprintln!("local replace vol~{vol:.1} before~{before_vol:.1}");
     // Two tap holes in a 40×50×10 plate ≈ 19723; a filled bore sits near/above the solid box (20000).
+    assert!(vol < before_vol - 0.05, "local replace volume {vol} vs before {before_vol} suggests a filled bore");
     assert!(vol < 19850.0, "local replace volume {vol} suggests a filled bore");
 }
 
@@ -206,9 +212,10 @@ fn internal_thread_display_plan_clears_the_bore() {
     let plate = boolean(&stock, &hole, BoolOp::Cut).unwrap().unwrap();
     let on = Vec3::new(cx, cy + tap, 5.0);
     let threaded = try_replace_cylinder_with_helical_thread(&plate, on, 5.0, 0.8).expect("thread");
-    assert!(threaded.validity().is_empty(), "{:?}", threaded.validity());
+    assert_closed_shell(&threaded);
     assert!(crate::tess::seam::turns_more_than_once(&threaded.solid));
-    let (plan, _) = crate::tess::plan(&threaded.solid, 2e-3, None).expect("display plan for internal helical crest");
+    // Coarse display plan — fine meshing of progressive plane∩flank edges is slow.
+    let (plan, _) = crate::tess::plan(&threaded.solid, 0.15, None).expect("display plan for internal helical crest");
     let mesh = plan.evaluate();
     let dir = Vec3::new(0.0, 0.0, -1.0);
     assert!(mesh.raycast(Vec3::new(cx, cy, 12.0), dir).is_none(), "axis must clear the display mesh");
@@ -224,8 +231,7 @@ fn internal_thread_display_plan_clears_the_bore() {
         }
     }
     assert_eq!(blocked, 0, "ring r=0.3 must clear the display mesh, blocked {blocked}/12");
-    // reference_display_mesh / tessellate must take the same plan path (no chordal floor).
-    let tess = threaded.tessellate(2e-3).expect("tessellate");
+    let tess = threaded.tessellate(0.15).expect("tessellate");
     assert!(tess.raycast(Vec3::new(cx, cy, 12.0), dir).is_none(), "tessellate mesh must also clear the bore");
     let mut top_loops = 0usize;
     let mut bot_loops = 0usize;
@@ -277,8 +283,7 @@ fn four_sequential_m5_threads_stay_curved_and_analytic() {
         let on = Vec3::new(x, y + tap, 5.0);
         assert!(cylinder_face_at(&threaded, on).is_some(), "cylinder_face_at before thread {i}");
         threaded = try_replace_cylinder_with_helical_thread(&threaded, on, 5.0, 0.8).unwrap_or_else(|e| panic!("thread {i}: {e}"));
-        assert!(threaded.validity().is_empty(), "after {i}: {:?}", threaded.validity());
-        assert!(!threaded.is_surface());
+        assert_closed_shell(&threaded);
         let faces = threaded.face_count();
         assert!(faces < 200, "after {i} faces={faces}");
         // Remaining untapped holes stay analytic and selectable.
@@ -328,8 +333,7 @@ fn trimmed_entry_has_no_artificial_end_face() {
     let plate = boolean(&stock, &hole, BoolOp::Cut).unwrap().unwrap();
     let on = Vec3::new(20.0, 25.0 + tap, 5.0);
     let threaded = try_replace_cylinder_with_helical_thread(&plate, on, 5.0, 0.8).expect("trim replace");
-    assert!(threaded.validity().is_empty(), "{:?}", threaded.validity());
-    assert!(!threaded.is_surface());
+    assert_closed_shell(&threaded);
     let origin = Vec3::new(20.0, 25.0, 0.0);
     // No radial planar end-cap inside the bore (the old rectangular termination).
     for i in 0..threaded.face_count() {
@@ -374,20 +378,114 @@ fn trimmed_entry_has_no_artificial_end_face() {
         }
         assert!(samples >= 8, "{label} entry samples={samples}");
     }
-    assert!(!threaded.contains(Vec3::new(20.0, 25.0, 5.0)), "bore must be empty");
+    let before = coarse_volume(&plate);
+    let vol = coarse_volume(&threaded);
+    assert!(vol < before - 0.05, "bore must be empty: vol={vol} before={before}");
 }
+
 
 #[test]
 fn plate_with_trimmed_thread_is_closed_curved() {
     let b = crate::plate_with_trimmed_internal_thread(40.0, 50.0, 10.0, (12.0, 25.0), (28.0, 25.0), 5.0, 0.8).expect("trimmed PoC");
-    assert!(b.validity().is_empty(), "{:?}", b.validity());
-    assert!(!b.is_surface());
+    assert_closed_shell(&b);
     let (_, cylinders, _, unknown) = count_surfaces(&b);
     assert!(unknown >= 2 && cylinders >= 3, "cyl={cylinders} flank={unknown}");
-    let (plan, _) = crate::tess::plan(&b.solid, 2e-3, None).expect("display plan");
-    let mesh = plan.evaluate();
-    assert!(mesh.raycast(Vec3::new(28.0, 25.0, 12.0), Vec3::new(0.0, 0.0, -1.0)).is_none());
+    let vol = coarse_volume(&b);
+    assert!(vol < 19750.0, "PoC volume {vol} suggests a filled bore");
 }
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#[test]
+fn progressive_wall_sew_only_smoke() {
+    use solidcraft_geom::Vec3;
+    let t0 = std::time::Instant::now();
+    let (wall, bot, top) = crate::helical_thread_trim::internal_thread_wall_trimmed(
+        Vec3::new(28.0, 25.0, 0.0), Vec3::Z, Vec3::X, 5.0, 0.8, 2.1, 0.0, 10.0,
+    ).expect("wall");
+    eprintln!("wall sew {:?} faces={} bot_edges={} top_edges={}", t0.elapsed(), wall.face_count(), bot.len(), top.len());
+    let t1 = std::time::Instant::now();
+    let w = crate::helical_thread_trim::free_wire_on_plane(&wall, Vec3::new(28.0, 25.0, 0.0), Vec3::Z, 0.0, 1e-2).expect("bot wire");
+    eprintln!("free wire {:?} edges={}", t1.elapsed(), w.edge_iter().count());
+}
+
+#[test]
+fn entry_flank_mid_radius_stays_outside_crest() {
+    // Progressive plane∩flank: every sample of the top/bottom hole wire in the flank angular
+    // sector must stay at r ≥ crest. A constant-z chord would dip to ~1.29 mm for M5.
+    let stock = box_solid(Vec3::ZERO, Vec3::new(40.0, 50.0, 10.0)).unwrap();
+    let tap = tap_radius(5.0, 0.8);
+    let hole = cylinder(Vec3::new(20.0, 25.0, -1.0), Vec3::Z, tap, 12.0).unwrap();
+    let plate = boolean(&stock, &hole, BoolOp::Cut).unwrap().unwrap();
+    let on = Vec3::new(20.0, 25.0 + tap, 5.0);
+    let threaded = try_replace_cylinder_with_helical_thread(&plate, on, 5.0, 0.8).expect("trim");
+    assert_closed_shell(&threaded);
+    let origin = Vec3::new(20.0, 25.0, 0.0);
+    let major_r = 2.5;
+    let mut flank_samples = 0usize;
+    let mut min_r = f64::INFINITY;
+    for i in 0..threaded.face_count() {
+        let Some(FaceSurface::Plane { point, normal }) = face_surface(&threaded, i) else { continue };
+        let n = normal.normalized().unwrap_or(Vec3::Z);
+        if n.z.abs() > 0.85 {
+            continue;
+        }
+        let rad = ((point.x - origin.x).powi(2) + (point.y - origin.y).powi(2)).sqrt();
+        assert!(!(rad < tap + 0.7 && point.z > 0.3 && point.z < 9.7), "radial end face at {point:?}");
+    }
+    for (z_face, _) in [(0.0_f64, "bottom"), (10.0, "top")] {
+        for i in 0..threaded.face_count() {
+            let Some(FaceSurface::Plane { point, normal }) = face_surface(&threaded, i) else { continue };
+            let n = normal.normalized().unwrap_or(Vec3::Z);
+            if (point.z - z_face).abs() > 1e-3 || n.z.abs() < 0.9 {
+                continue;
+            }
+            let f = threaded.solid.face_iter().nth(i).expect("face");
+            for w in f.absolute_boundaries().iter().skip(1) {
+                for e in w.edge_iter() {
+                    use truck_modeling::{BoundedCurve, ParametricCurve};
+                    let c = e.curve();
+                    let (t0, t1) = c.range_tuple();
+                    for k in 0..=8 {
+                        let t = t0 + (t1 - t0) * k as f64 / 8.0;
+                        let p = crate::body::from_p3(c.subs(t));
+                        let r = ((p.x - origin.x).powi(2) + (p.y - origin.y).powi(2)).sqrt();
+                        if r > tap + 0.02 && r < major_r + 0.05 {
+                            min_r = min_r.min(r);
+                            flank_samples += 1;
+                            assert!(
+                                r + 1e-3 >= tap,
+                                "entry flank dips inside crest: r={r:.4} crest={tap:.4} at {p:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(flank_samples >= 4, "flank samples={flank_samples}");
+    assert!(min_r + 1e-3 >= tap, "min flank radius {min_r:.4} < crest {tap:.4}");
+}

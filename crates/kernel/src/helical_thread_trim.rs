@@ -1,6 +1,7 @@
 //! Plane-trimmed helical thread ends: the groove is a continuous helix clipped by the entry/exit
-//! planes. Free boundaries lie in those planes (long crest arc + flank segments + short root arc).
-//! There are no radial planar end-caps inside the solid.
+//! planes. Free boundaries lie in those planes (long crest arc + progressive plane∩flank curves +
+//! short root). Meridional (same-angle) ruled flanks; no radial end-caps and no constant-z chord
+//! that dips inside the crest.
 
 use std::f64::consts::{PI, TAU};
 use std::sync::Arc;
@@ -27,6 +28,7 @@ fn line(a: Vec3, b: Vec3) -> EdgeSpec {
     EdgeSpec::Line { a, b }
 }
 
+#[allow(dead_code)]
 fn ends(e: &EdgeSpec) -> Result<(Vec3, Vec3)> {
     match e {
         EdgeSpec::Chain { ctrl, .. } => Ok((
@@ -99,28 +101,88 @@ fn profile(pitch: f64) -> (f64, f64) {
     (foot, crest)
 }
 
-/// Closed planar entry/exit loop at axial `z`: short crest arc + upper flank + short root + lower
-/// flank. Helix ends at this plane are coplanar, so the flank edges are the ruled-surface end
-/// rulings (straight) and lie on both the wall and the plate face.
-pub(crate) fn entry_loop(origin: Vec3, k: Vec3, u: Vec3, rc: f64, rm: f64, z0: f64, pitch: f64, foot: f64, crest: f64, z: f64) -> Result<Vec<EdgeSpec>> {
+/// Plane ∩ meridional flank as one cubic chain through on-surface samples (progressive radius;
+/// never a constant-z chord through the bore). Samples lie on both the ruled flank and the plane.
+fn flank_plane_curve(
+    origin: Vec3,
+    k: Vec3,
+    u: Vec3,
+    r0: f64,
+    r1: f64,
+    z0_0: f64,
+    z0_1: f64,
+    pitch: f64,
+    z: f64,
+) -> Result<EdgeSpec> {
+    let v = k.cross(u);
+    let a0 = angle_at_z(z0_0, pitch, z);
+    let a1 = angle_at_z(z0_1, pitch, z);
+    let delta_z = z0_1 - z0_0;
+    if delta_z.abs() < 1e-14 || (a1 - a0).abs() < 1e-14 {
+        return Err(KernelError::Invalid("degenerate flank plane curve".into()));
+    }
+    let n = 8usize;
+    let mut pts = Vec::with_capacity(n + 1);
+    for i in 0..=n {
+        let t = i as f64 / n as f64;
+        let a = a0 + (a1 - a0) * t;
+        let z_c = z0_0 + pitch * a / TAU;
+        let s = ((z - z_c) / delta_z).clamp(0.0, 1.0);
+        let r = r0 + (r1 - r0) * s;
+        pts.push(origin + k * z + (u * a.cos() + v * a.sin()) * r);
+    }
+    let mut ctrl = vec![pts[0]];
+    for i in 0..n {
+        let (p0, p1) = (pts[i], pts[i + 1]);
+        ctrl.extend([p0 + (p1 - p0) / 3.0, p0 + (p1 - p0) * (2.0 / 3.0), p1]);
+    }
+    Ok(EdgeSpec::Chain { degree: 3, ctrl: ctrl.into() })
+}
+
+fn flank_plane_edges(
+    origin: Vec3,
+    k: Vec3,
+    u: Vec3,
+    r0: f64,
+    r1: f64,
+    z0_0: f64,
+    z0_1: f64,
+    pitch: f64,
+    z: f64,
+) -> Result<Vec<EdgeSpec>> {
+    Ok(vec![flank_plane_curve(origin, k, u, r0, r1, z0_0, z0_1, pitch, z)?])
+}
+
+/// Closed planar entry/exit loop at axial `z`: long crest arc + progressive upper flank + short
+/// root + progressive lower flank. Flank edges are plane∩meridional-ruled polylines (not straight
+/// constant-z chords through the bore).
+#[allow(dead_code)]
+pub(crate) fn entry_loop(
+    origin: Vec3,
+    k: Vec3,
+    u: Vec3,
+    rc: f64,
+    rm: f64,
+    z0: f64,
+    pitch: f64,
+    foot: f64,
+    crest: f64,
+    z: f64,
+) -> Result<Vec<EdgeSpec>> {
     let a_fl = angle_at_z(z0 - foot, pitch, z);
     let a_fu = angle_at_z(z0 + foot, pitch, z);
     let a_cl = angle_at_z(z0 - crest, pitch, z);
     let a_cu = angle_at_z(z0 + crest, pitch, z);
-    let fl = helix_point(origin, k, u, rc, z0 - foot, pitch, a_fl);
-    let fu = helix_point(origin, k, u, rc, z0 + foot, pitch, a_fu);
-    let cl = helix_point(origin, k, u, rm, z0 - crest, pitch, a_cl);
-    let cu = helix_point(origin, k, u, rm, z0 + crest, pitch, a_cu);
-    // Short crest land (¼ turn): the groove occupies the remaining ¾ turn at this z-cut.
     let mut loop_e = circle_arcs(origin, k, u, rc, z, a_fl, a_fu + TAU)?;
-    loop_e.push(line(fu, cu));
+    loop_e.extend(flank_plane_edges(origin, k, u, rc, rm, z0 + foot, z0 + crest, pitch, z)?);
     loop_e.extend(circle_arcs(origin, k, u, rm, z, a_cu, a_cl)?);
-    loop_e.push(line(cl, fl));
+    loop_e.extend(flank_plane_edges(origin, k, u, rm, rc, z0 - crest, z0 - foot, pitch, z)?);
     Ok(loop_e)
 }
 
 /// Open helical wall whose free boundaries are the planar entry loops at `z_lo` and `z_hi`.
-/// No radial end-cap faces — the groove is trimmed by those planes.
+/// Meridional (same-angle) ruled flanks; free ends are plane∩flank curves — no radial end-caps
+/// and no constant-z chord termination inside the crest.
 pub fn internal_thread_wall_trimmed(
     origin: Vec3,
     axis: Vec3,
@@ -146,8 +208,20 @@ pub fn internal_thread_wall_trimmed(
     let (foot, crest_h) = profile(pitch);
     // Centreline one pitch below the lower face so the mathematical helix extends past both planes.
     let z0 = z_lo - pitch;
-    // One shared angular span for every helix so ruled flank chains keep identical piece counts
-    // (per-helix angle_at_z(z_hi) can differ by an ulp after boolean cylinder extents).
+    // Shared angular range for meridional generators, extended past both faces so plane∩flank
+    // curves fall in the interior of the ruled parameter domain (not on a construction end-cap).
+    let margin = 0.25;
+    let a_lo = angle_at_z(z0 + foot, pitch, z_lo) - margin;
+    let a_hi = angle_at_z(z0 - foot, pitch, z_hi) + margin;
+    if a_hi - a_lo < TAU * height / pitch {
+        return Err(KernelError::Invalid("thread angle span".into()));
+    }
+    let fl_gen = helix_edge(origin, k, u, rc, z0 - foot, pitch, a_lo, a_hi)?;
+    let fu_gen = helix_edge(origin, k, u, rc, z0 + foot, pitch, a_lo, a_hi)?;
+    let cl_gen = helix_edge(origin, k, u, rm, z0 - crest_h, pitch, a_lo, a_hi)?;
+    let cu_gen = helix_edge(origin, k, u, rm, z0 + crest_h, pitch, a_lo, a_hi)?;
+
+    // Helix rails clipped to where each generator crosses the plate faces (shared span length).
     let span = TAU * height / pitch;
     let a_fl_lo = angle_at_z(z0 - foot, pitch, z_lo);
     let a_fl_hi = a_fl_lo + span;
@@ -162,24 +236,31 @@ pub fn internal_thread_wall_trimmed(
     let fu = helix_edge(origin, k, u, rc, z0 + foot, pitch, a_fu_lo, a_fu_hi)?;
     let cl = helix_edge(origin, k, u, rm, z0 - crest_h, pitch, a_cl_lo, a_cl_hi)?;
     let cu = helix_edge(origin, k, u, rm, z0 + crest_h, pitch, a_cu_lo, a_cu_hi)?;
-    let (fl0, fl1) = ends(&fl)?;
-    let (fu0, fu1) = ends(&fu)?;
-    let (cl0, cl1) = ends(&cl)?;
-    let (cu0, cu1) = ends(&cu)?;
 
-    let bot_loop = entry_loop(origin, k, u, rc, rm, z0, pitch, foot, crest_h, z_lo)?;
-    let top_loop = entry_loop(origin, k, u, rc, rm, z0, pitch, foot, crest_h, z_hi)?;
-
+    // Plane∩flank free edges — built once and shared by wall faces and entry loops.
+    let bot_flank_u = flank_plane_curve(origin, k, u, rc, rm, z0 + foot, z0 + crest_h, pitch, z_lo)?;
+    let top_flank_u = flank_plane_curve(origin, k, u, rm, rc, z0 + crest_h, z0 + foot, pitch, z_hi)?;
+    let bot_flank_l = flank_plane_curve(origin, k, u, rm, rc, z0 - crest_h, z0 - foot, pitch, z_lo)?;
+    let top_flank_l = flank_plane_curve(origin, k, u, rc, rm, z0 - foot, z0 - crest_h, pitch, z_hi)?;
     let bot_crest = circle_arcs(origin, k, u, rc, z_lo, a_fl_lo, a_fu_lo + TAU)?;
     let top_crest = circle_arcs(origin, k, u, rc, z_hi, a_fl_hi, a_fu_hi + TAU)?;
     let bot_root = circle_arcs(origin, k, u, rm, z_lo, a_cu_lo, a_cl_lo)?;
     let top_root = circle_arcs(origin, k, u, rm, z_hi, a_cu_hi, a_cl_hi)?;
 
+    let mut bot_loop = bot_crest.clone();
+    bot_loop.push(bot_flank_u.clone());
+    bot_loop.extend(bot_root.clone());
+    bot_loop.push(bot_flank_l.clone());
+    let mut top_loop = top_crest.clone();
+    top_loop.push(rev(&top_flank_u));
+    top_loop.extend(top_root.clone());
+    top_loop.push(rev(&top_flank_l));
+
     let v = k.cross(u);
     let at = |r: f64, a: f64, z: f64| origin + k * z + (u * a.cos() + v * a.sin()) * r;
     let out = |a: f64| u * a.cos() + v * a.sin();
     let mid_z = 0.5 * (z_lo + z_hi);
-    let mid_a = angle_at_z(z0, pitch, mid_z);
+    let mid_a = 0.5 * (a_lo + a_hi);
     let flank = 0.5_f64;
 
     let mut crest_loop: Vec<EdgeSpec> = bot_crest;
@@ -192,12 +273,15 @@ pub fn internal_thread_wall_trimmed(
     root_loop.extend(top_root.iter().rev().map(rev));
     root_loop.push(rev(&cu));
 
+    let lower_flank = vec![fl, top_flank_l, rev(&cl), bot_flank_l];
+    let upper_flank = vec![cu, top_flank_u, rev(&fu), bot_flank_u];
+
     let wall = crate::sew_open(&[
         FaceSpec {
             loops: vec![crest_loop],
             surface: SurfSpec::Revolved {
-                a: origin + u * rc + k * z_lo,
-                b: origin + u * rc + k * z_hi,
+                a: origin + u * rc + k * (z_lo - pitch),
+                b: origin + u * rc + k * (z_hi + pitch),
                 axis_origin: origin,
                 axis: k,
                 angle: TAU,
@@ -205,20 +289,20 @@ pub fn internal_thread_wall_trimmed(
             probe: Some((at(rc, mid_a + PI, mid_z), -out(mid_a + PI))),
         },
         FaceSpec {
-            loops: vec![vec![fl.clone(), line(fl1, cl1), rev(&cl), line(cl0, fl0)]],
-            surface: SurfSpec::Ruled { a: fl.clone(), b: cl.clone() },
+            loops: vec![lower_flank],
+            surface: SurfSpec::Ruled { a: fl_gen, b: cl_gen },
             probe: Some((at((rc + rm) / 2.0, mid_a, mid_z), out(mid_a) * flank)),
         },
         FaceSpec {
-            loops: vec![vec![cu.clone(), line(cu1, fu1), rev(&fu), line(fu0, cu0)]],
-            surface: SurfSpec::Ruled { a: fu.clone(), b: cu.clone() },
+            loops: vec![upper_flank],
+            surface: SurfSpec::Ruled { a: fu_gen, b: cu_gen },
             probe: Some((at((rc + rm) / 2.0, mid_a, mid_z), out(mid_a) * flank)),
         },
         FaceSpec {
             loops: vec![root_loop],
             surface: SurfSpec::Revolved {
-                a: origin + u * rm + k * z_lo,
-                b: origin + u * rm + k * z_hi,
+                a: origin + u * rm + k * (z_lo - pitch),
+                b: origin + u * rm + k * (z_hi + pitch),
                 axis_origin: origin,
                 axis: k,
                 angle: TAU,
@@ -228,6 +312,75 @@ pub fn internal_thread_wall_trimmed(
     ])?;
 
     Ok((wall, bot_loop, top_loop))
+}
+
+/// Assemble the wall's free edges that lie on plane `z` into a closed truck wire (post-sew
+/// geometry, so cap stitch midpoints match the wall exactly).
+pub(crate) fn free_wire_on_plane(body: &Body, origin: Vec3, k: Vec3, z: f64, tol: f64) -> Result<mt::Wire> {
+    let k = k.normalized().ok_or_else(|| KernelError::Invalid("plane axis".into()))?;
+    let axial = |p: Vec3| (p - origin).dot(k);
+    let mut edges: Vec<mt::Edge> = Vec::new();
+    for e in free_truck_edges(body) {
+        let abs = if e.orientation() { e.clone() } else { e.inverse() };
+        let c = abs.curve();
+        let (t0, t1) = c.range_tuple();
+        if !(t0.is_finite() && t1.is_finite()) {
+            continue;
+        }
+        let a = from_p3(c.subs(t0));
+        let b = from_p3(c.subs(t1));
+        let mid = from_p3(c.subs(0.5 * (t0 + t1)));
+        if (axial(a) - z).abs() <= tol && (axial(b) - z).abs() <= tol && (axial(mid) - z).abs() <= tol {
+            edges.push(e);
+        }
+    }
+    if edges.is_empty() {
+        return Err(KernelError::Failed("no free edges on the entry plane".into()));
+    }
+    let end_pt = |e: &mt::Edge, at_front: bool| -> Vec3 {
+        let abs = if e.orientation() { e.clone() } else { e.inverse() };
+        let v = if at_front { abs.front() } else { abs.back() };
+        from_p3(v.point())
+    };
+    let mut wire_edges = vec![edges.swap_remove(0)];
+    let start = end_pt(&wire_edges[0], true);
+    let mut cur = end_pt(&wire_edges[0], false);
+    let mut guard = 0usize;
+    while cur.dist(start) > tol {
+        guard += 1;
+        if guard > 10_000 {
+            return Err(KernelError::Failed("entry free-wire assembly runaway".into()));
+        }
+        let mut found = None;
+        for (i, e) in edges.iter().enumerate() {
+            let a = end_pt(e, true);
+            let b = end_pt(e, false);
+            if a.dist(cur) <= tol {
+                found = Some((i, e.clone(), b));
+                break;
+            }
+            if b.dist(cur) <= tol {
+                found = Some((i, e.inverse(), a));
+                break;
+            }
+        }
+        let Some((i, edge, next)) = found else {
+            return Err(KernelError::Failed("entry free edges do not form a closed wire".into()));
+        };
+        edges.swap_remove(i);
+        wire_edges.push(edge);
+        cur = next;
+    }
+    if !edges.is_empty() {
+        return Err(KernelError::Failed("extra free edges on the entry plane".into()));
+    }
+    Ok(mt::Wire::from(wire_edges))
+}
+
+/// Reverse a closed truck wire (each edge inverted, order reversed).
+fn reverse_wire(w: &mt::Wire) -> mt::Wire {
+    let edges: Vec<mt::Edge> = w.edge_iter().map(|e| e.inverse()).rev().collect();
+    mt::Wire::from(edges)
 }
 
 fn truck_edge_to_spec(e: &mt::Edge) -> Result<EdgeSpec> {
@@ -538,6 +691,7 @@ fn loop_perimeter(edges: &[EdgeSpec]) -> f64 {
 
 /// Replace one cylindrical hole wire on an existing planar face with a new entry loop, keeping
 /// every other wire as the original truck edges so stitch rematches prior thread walls.
+#[allow(dead_code)]
 pub(crate) fn replace_bore_wire_on_face(
     face: &mt::Face,
     origin: Vec3,
@@ -559,6 +713,21 @@ pub(crate) fn replace_bore_wire_on_face(
         .next()
         .and_then(|f| f.absolute_boundaries().first().cloned())
         .ok_or_else(|| KernelError::Failed("entry face has no wire".into()))?;
+    replace_bore_wire_with_truck_wire(face, origin, k, old_r, entry_wire, false, tol)
+}
+
+/// Like [`replace_bore_wire_on_face`], but inserts an already-sewn truck wire (typically the
+/// wall's post-sew free boundary) so stitch midpoints match the helical wall exactly.
+pub(crate) fn replace_bore_wire_with_truck_wire(
+    face: &mt::Face,
+    origin: Vec3,
+    k: Vec3,
+    old_r: f64,
+    entry_wire: mt::Wire,
+    reverse_entry: bool,
+    tol: f64,
+) -> Result<Body> {
+    let entry_wire = if reverse_entry { reverse_wire(&entry_wire) } else { entry_wire };
     let mut wires = face.absolute_boundaries().clone();
     let mut replaced = false;
     for w in &mut wires {
@@ -612,6 +781,7 @@ fn loop_near_hole(edges: &[EdgeSpec], origin: Vec3, k: Vec3, r_min: f64, r_max: 
 }
 
 /// Build a rectangular plate with a plain hole and a plane-trimmed internal helical thread (PoC).
+/// Uses the same local cylinder-replacement path as production modeled threads.
 pub fn plate_with_trimmed_internal_thread(
     length: f64,
     width: f64,
@@ -622,109 +792,14 @@ pub fn plate_with_trimmed_internal_thread(
     pitch: f64,
 ) -> Result<Body> {
     let rc = tap_radius(major, pitch);
-    let rm = major / 2.0;
-    if !(length > major * 3.0 && width > major * 3.0 && height > pitch * 3.0 && rc > 0.5 && rm > rc) {
+    if !(length > major * 3.0 && width > major * 3.0 && height > pitch * 3.0 && rc > 0.5) {
         return Err(KernelError::Invalid("plate / thread size".into()));
     }
-    let k = Vec3::Z;
-    let u = Vec3::X;
-    let origin_t = Vec3::new(thread_xy.0, thread_xy.1, 0.0);
-    let origin_p = Vec3::new(plain_xy.0, plain_xy.1, 0.0);
-    let (wall, bot_entry, top_entry) = internal_thread_wall_trimmed(origin_t, k, u, major, pitch, rc, 0.0, height)?;
-
-    fn rect_z(z: f64, length: f64, width: f64) -> Vec<EdgeSpec> {
-        let (a, b, c, d) = (Vec3::new(0.0, 0.0, z), Vec3::new(length, 0.0, z), Vec3::new(length, width, z), Vec3::new(0.0, width, z));
-        vec![line(a, b), line(b, c), line(c, d), line(d, a)]
-    }
-    fn circle(origin: Vec3, k: Vec3, u: Vec3, r: f64, z: f64) -> Result<Vec<EdgeSpec>> {
-        circle_arcs(origin, k, u, r, z, 0.3, 0.3 + TAU)
-    }
-
-    let (l, w, hz) = (length, width, height);
-    let plain_bot = circle(origin_p, k, u, rc, 0.0)?;
-    let plain_top = circle(origin_p, k, u, rc, hz)?;
-
-    let bottom = crate::sew_open(&[FaceSpec {
-        loops: vec![
-            rect_z(0.0, l, w).into_iter().rev().map(|e| rev(&e)).collect(),
-            plain_bot.clone(),
-            bot_entry,
-        ],
-        surface: SurfSpec::Plane,
-        probe: None,
-    }])?;
-    let top = crate::sew_open(&[FaceSpec {
-        loops: vec![
-            rect_z(hz, l, w),
-            plain_top.clone().into_iter().rev().map(|e| rev(&e)).collect(),
-            top_entry.into_iter().rev().map(|e| rev(&e)).collect(),
-        ],
-        surface: SurfSpec::Plane,
-        probe: None,
-    }])?;
-
-    let sides = crate::sew_open(&[
-        FaceSpec {
-            loops: vec![vec![
-                line(Vec3::new(0.0, 0.0, 0.0), Vec3::new(l, 0.0, 0.0)),
-                line(Vec3::new(l, 0.0, 0.0), Vec3::new(l, 0.0, hz)),
-                line(Vec3::new(l, 0.0, hz), Vec3::new(0.0, 0.0, hz)),
-                line(Vec3::new(0.0, 0.0, hz), Vec3::new(0.0, 0.0, 0.0)),
-            ]],
-            surface: SurfSpec::Plane,
-            probe: None,
-        },
-        FaceSpec {
-            loops: vec![vec![
-                line(Vec3::new(l, 0.0, 0.0), Vec3::new(l, w, 0.0)),
-                line(Vec3::new(l, w, 0.0), Vec3::new(l, w, hz)),
-                line(Vec3::new(l, w, hz), Vec3::new(l, 0.0, hz)),
-                line(Vec3::new(l, 0.0, hz), Vec3::new(l, 0.0, 0.0)),
-            ]],
-            surface: SurfSpec::Plane,
-            probe: None,
-        },
-        FaceSpec {
-            loops: vec![vec![
-                line(Vec3::new(l, w, 0.0), Vec3::new(0.0, w, 0.0)),
-                line(Vec3::new(0.0, w, 0.0), Vec3::new(0.0, w, hz)),
-                line(Vec3::new(0.0, w, hz), Vec3::new(l, w, hz)),
-                line(Vec3::new(l, w, hz), Vec3::new(l, w, 0.0)),
-            ]],
-            surface: SurfSpec::Plane,
-            probe: None,
-        },
-        FaceSpec {
-            loops: vec![vec![
-                line(Vec3::new(0.0, w, 0.0), Vec3::new(0.0, 0.0, 0.0)),
-                line(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, hz)),
-                line(Vec3::new(0.0, 0.0, hz), Vec3::new(0.0, w, hz)),
-                line(Vec3::new(0.0, w, hz), Vec3::new(0.0, w, 0.0)),
-            ]],
-            surface: SurfSpec::Plane,
-            probe: None,
-        },
-        FaceSpec {
-            loops: vec![plain_bot.into_iter().rev().map(|e| rev(&e)).collect(), plain_top],
-            surface: SurfSpec::Revolved {
-                a: origin_p + u * rc - k,
-                b: origin_p + u * rc + k * (hz + 1.0),
-                axis_origin: origin_p,
-                axis: k,
-                angle: TAU,
-            },
-            probe: Some((origin_p + Vec3::new(-rc, 0.0, hz * 0.5), Vec3::new(-1.0, 0.0, 0.0))),
-        },
-    ])?;
-
-    match crate::stitch(&[&sides, &wall, &bottom, &top], pitch * 1e-4) {
-        Ok(b) if b.validity().is_empty() && b.shell_count() == 1 && !b.is_surface() => Ok(b),
-        Ok(b) => Err(KernelError::Failed(format!(
-            "trimmed thread plate stitch: shells={}, surface={}, validity={:?}",
-            b.shell_count(),
-            b.is_surface(),
-            b.validity()
-        ))),
-        Err(e) => Err(KernelError::Failed(format!("trimmed thread plate stitch failed: {e}"))),
-    }
+    let stock = crate::box_solid(Vec3::ZERO, Vec3::new(length, width, height))?;
+    let plain = crate::cylinder(Vec3::new(plain_xy.0, plain_xy.1, -1.0), Vec3::Z, rc, height + 2.0)?;
+    let hole = crate::cylinder(Vec3::new(thread_xy.0, thread_xy.1, -1.0), Vec3::Z, rc, height + 2.0)?;
+    let plate = crate::boolean(&stock, &plain, crate::BoolOp::Cut)?.ok_or_else(|| KernelError::Failed("plain hole cut".into()))?;
+    let plate = crate::boolean(&plate, &hole, crate::BoolOp::Cut)?.ok_or_else(|| KernelError::Failed("thread hole cut".into()))?;
+    let on = Vec3::new(thread_xy.0, thread_xy.1 + rc, height * 0.5);
+    crate::helical_thread::try_replace_cylinder_with_helical_thread(&plate, on, major, pitch)
 }

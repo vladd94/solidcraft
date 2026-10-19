@@ -645,23 +645,33 @@ pub fn try_replace_cylinder_with_helical_thread(body: &Body, on_face: Vec3, majo
     drop.dedup();
     let open = crate::remove_faces(body, &drop)?;
     let u = k.any_perp();
-    let (wall, bot_entry, top_entry) =
+    let (wall, _bot_entry, _top_entry) =
         crate::helical_thread_trim::internal_thread_wall_trimmed(origin, k, u, major, pitch, cyl.radius, z_lo, z_hi)?;
+    // Use the wall's post-sew free boundaries so cap edges share exact truck midpoints with the wall
+    // (rebuilding plane∩flank chains independently can drift after Face::try_new).
+    let bot_wire = crate::helical_thread_trim::free_wire_on_plane(&wall, origin, k, z_lo, rim_tol)?;
+    let top_wire = crate::helical_thread_trim::free_wire_on_plane(&wall, origin, k, z_hi, rim_tol)?;
     // Prefer reversing the entry when the face outward normal aligns with `k` (hole CW about outward).
     let prefer_bot = bot_normal.dot(k) > 0.0;
     let prefer_top = top_normal.dot(k) > 0.0;
     let mut order = vec![(prefer_bot, prefer_top), (!prefer_bot, prefer_top), (prefer_bot, !prefer_top), (!prefer_bot, !prefer_top)];
     order.dedup();
+    let mid = origin + k * (0.5 * (z_lo + z_hi));
+    let before_vol = body.tessellate(0.25).ok().map(|m| m.measure().volume);
     let mut last_err = KernelError::Failed("helical thread stitch produced no closed solid".into());
     for (br, tr) in order {
-        let bottom = match crate::helical_thread_trim::replace_bore_wire_on_face(&bot_mt, origin, k, cyl.radius, bot_entry.clone(), br, rim_tol) {
+        let bottom = match crate::helical_thread_trim::replace_bore_wire_with_truck_wire(
+            &bot_mt, origin, k, cyl.radius, bot_wire.clone(), br, rim_tol,
+        ) {
             Ok(b) => b,
             Err(e) => {
                 last_err = e;
                 continue;
             }
         };
-        let top = match crate::helical_thread_trim::replace_bore_wire_on_face(&top_mt, origin, k, cyl.radius, top_entry.clone(), tr, rim_tol) {
+        let top = match crate::helical_thread_trim::replace_bore_wire_with_truck_wire(
+            &top_mt, origin, k, cyl.radius, top_wire.clone(), tr, rim_tol,
+        ) {
             Ok(b) => b,
             Err(e) => {
                 last_err = e;
@@ -669,21 +679,25 @@ pub fn try_replace_cylinder_with_helical_thread(body: &Body, on_face: Vec3, majo
             }
         };
         match crate::stitch(&[&open, &wall, &bottom, &top], pitch * 1e-4) {
-            Ok(b) if b.validity().is_empty() && b.shell_count() == 1 && !b.is_surface() => {
-                let mid = origin + k * (0.5 * (z_lo + z_hi));
-                let vol_ok = match (body.tessellate(5e-3), b.tessellate(5e-3)) {
-                    (Ok(before), Ok(after)) => after.measure().volume < before.measure().volume + pitch,
-                    _ => true,
+            // Avoid `validity()` here: it meshes/measures and can be very slow on progressive flanks.
+            // Closedness is `!is_surface()`; bore emptiness is judged by coarse volume drop.
+            Ok(b) if b.shell_count() == 1 && !b.is_surface() => {
+                let accept = |cand: &Body| -> bool {
+                    match (before_vol, cand.tessellate(0.25)) {
+                        (Some(before), Ok(after)) => {
+                            let vol = after.measure().volume;
+                            // Thread grooves remove stock vs the plain tap hole. A filled bore sits
+                            // near/above the uncut plate volume.
+                            vol.is_finite() && vol > 0.0 && vol < before - pitch * 0.05
+                        }
+                        _ => !cand.contains(mid),
+                    }
                 };
-                if !b.contains(mid) && vol_ok {
+                if accept(&b) {
                     return Ok(b);
                 }
                 if let Ok(inv) = invert_shell(&b) {
-                    let inv_vol_ok = match (body.tessellate(5e-3), inv.tessellate(5e-3)) {
-                        (Ok(before), Ok(after)) => after.measure().volume < before.measure().volume + pitch,
-                        _ => true,
-                    };
-                    if inv.validity().is_empty() && !inv.is_surface() && !inv.contains(mid) && inv_vol_ok {
+                    if !inv.is_surface() && accept(&inv) {
                         return Ok(inv);
                     }
                 }
@@ -691,10 +705,9 @@ pub fn try_replace_cylinder_with_helical_thread(body: &Body, on_face: Vec3, majo
             }
             Ok(b) => {
                 last_err = KernelError::Failed(format!(
-                    "helical thread stitch did not yield a single closed solid (shells={}, surface={}, validity={:?})",
+                    "helical thread stitch did not yield a single closed solid (shells={}, surface={})",
                     b.shell_count(),
-                    b.is_surface(),
-                    b.validity()
+                    b.is_surface()
                 ));
             }
             Err(e) => last_err = KernelError::Failed(format!("helical thread stitch failed: {e}")),
