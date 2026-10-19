@@ -217,6 +217,35 @@ pub fn metric_thread_sizes() -> &'static [(f64, f64)] {
     &ISO_COARSE
 }
 
+/// Conventional cutting-tap drill diameters (mm) for common ISO metric coarse pairs:
+/// `(nominal, pitch, tap_drill)`. These are manufacturing defaults, not `nominal − pitch`.
+const TAP_DRILL: &[(f64, f64, f64)] = &[
+    (3.0, 0.5, 2.5),
+    (4.0, 0.7, 3.3),
+    (5.0, 0.8, 4.2),
+    (6.0, 1.0, 5.0),
+    (8.0, 1.25, 6.8),
+    (10.0, 1.5, 8.5),
+    (12.0, 1.75, 10.2),
+    (16.0, 2.0, 14.0),
+    (20.0, 2.5, 17.5),
+];
+
+/// Conventional tap-drill rows `(nominal, pitch, tap_drill)` in millimetres.
+pub fn conventional_tap_drills() -> &'static [(f64, f64, f64)] {
+    TAP_DRILL
+}
+
+/// Pilot-hole diameter (mm) for a cutting tap of this metric size. Known coarse pairs use the
+/// conventional drill chart; anything else falls back to `major − pitch`.
+pub fn tap_drill_diameter(major: f64, pitch: f64) -> f64 {
+    TAP_DRILL
+        .iter()
+        .find(|(n, p, _)| (n - major).abs() < 1e-9 && (p - pitch).abs() < 1e-9)
+        .map(|(_, _, d)| *d)
+        .unwrap_or(major - pitch)
+}
+
 /// "M8" or "M8x1" → (nominal diameter, pitch).
 pub fn parse_metric_thread(s: &str) -> Option<(f64, f64)> {
     let t = s.trim().to_ascii_uppercase();
@@ -233,11 +262,11 @@ pub fn parse_metric_thread(s: &str) -> Option<(f64, f64)> {
 }
 
 /// The metric thread a cylinder of this diameter takes: a shaft is the major diameter, a hole
-/// the tap drill (major − pitch).
+/// the conventional tap drill.
 fn thread_for(diameter: f64, internal: bool) -> Option<(f64, f64)> {
     ISO_COARSE
         .iter()
-        .map(|&(n, p)| (n, p, if internal { n - p } else { n }))
+        .map(|&(n, p)| (n, p, if internal { tap_drill_diameter(n, p) } else { n }))
         .min_by(|a, b| (a.2 - diameter).abs().total_cmp(&(b.2 - diameter).abs()))
         .filter(|(_, _, want)| (want - diameter).abs() <= 0.15 * diameter)
         .map(|(n, p, _)| (n, p))
@@ -337,7 +366,10 @@ fn thread_groove(t: &ThreadInfo, radius: f64, open: (bool, bool)) -> Result<soli
         let shown = show_mm(dia);
         return Err(DocError::Invalid(if t.internal {
             let alt = alt.map(|a| format!(", or thread this hole {a}")).unwrap_or_default();
-            format!("this {shown} mm hole is too wide for a modelled {m} thread: {cut}; drill {} mm for {m}{alt}", show_mm(d - p))
+            format!(
+                "this {shown} mm hole is too wide for a modelled {m} thread: {cut}; drill {} mm for {m}{alt}",
+                show_mm(tap_drill_diameter(d, p))
+            )
         } else {
             let alt = alt.map(|a| format!(", or thread this shaft {a}")).unwrap_or_default();
             format!("this {shown} mm shaft is too thin for a modelled {m} thread: {cut}; make the shaft {} mm for {m}{alt}", show_mm(d))
@@ -361,14 +393,153 @@ fn thread_groove(t: &ThreadInfo, radius: f64, open: (bool, bool)) -> Result<soli
     let k = t.axis;
     let u = k.cross(if k.x.abs() < 0.9 { Vec3::new(1.0, 0.0, 0.0) } else { Vec3::new(0.0, 1.0, 0.0) });
     let u = u.normalized().ok_or_else(|| DocError::Invalid("thread axis".into()))?;
-    // Past a free end of the face the groove runs out into the air; elsewhere it stops square
-    // at the threaded length's end.
-    let (s0, s1) = (if open.0 { t.start - p } else { t.start }, if open.1 { t.end + p } else { t.end });
+    // The groove runs over the threaded length only. A one-pitch extension past a free end
+    // (`start − pitch` / `end + pitch`) made the profile fully developed at the entry plane;
+    // the curved B-rep path starts at the rim with a partial first turn instead.
+    let _ = open;
+    let (s0, s1) = (t.start, t.end);
     let base = t.axis_point + k * s0;
     let plane = Plane { origin: base, x: u, y: k };
     let section = [Vec2::new(r0, -w0), Vec2::new(r1, -w1), Vec2::new(r1, w1), Vec2::new(r0, w0)];
     // Sections 7.5° apart: the chords sag 0.2% of the radius.
     Ok(kernel::sweep_helix_mesh(&plane, &section, base, k, p, (s1 - s0) / p, 48)?)
+}
+
+/// Shaded cosmetic thread just inside a hole or just outside a shaft. One pitch is a narrow
+/// crest and two flanks that meet the next turn, so the wall reads as a thread rather than a
+/// stripe on the plain cylinder. The body is not cut. Empty when the thread has no usable axis.
+pub fn cosmetic_thread_mesh(t: &ThreadInfo) -> solidcraft_geom::Mesh {
+    let mut mesh = solidcraft_geom::Mesh::default();
+    let len = t.end - t.start;
+    let wall = if t.internal { (t.major_diameter - t.pitch) * 0.5 } else { t.major_diameter * 0.5 };
+    // Keep the whole form on the visible side of the cylinder so the solid face does not hide it.
+    let inset = (t.pitch * 0.04).clamp(0.02, 0.08);
+    let depth = (t.pitch * 0.541).min(wall * 0.45);
+    let crest_r = if t.internal { wall - inset - depth } else { wall + inset };
+    let root_r = if t.internal { wall - inset } else { (wall + inset - depth).max(wall * 0.2) };
+    let crest_half = t.pitch * 0.125;
+    let pitch_half = t.pitch * 0.5;
+    if !(len > 1e-6 && t.pitch > 1e-3 && wall > 1e-6 && crest_r > 1e-6 && root_r > 1e-6 && t.axis.is_finite() && t.axis_point.is_finite()) {
+        return mesh;
+    }
+    let Some(k) = t.axis.normalized() else { return mesh };
+    let u = k.any_perp();
+    let v = k.cross(u);
+    let steps = ((len / t.pitch * 48.0).ceil() as usize).clamp(24, 4_096);
+    let place = |s: f64, radial: f64, axial: f64| {
+        let along = (s + axial).clamp(t.start, t.end);
+        let ang = (s - t.start) / t.pitch * std::f64::consts::TAU;
+        t.axis_point + k * along + (u * ang.cos() + v * ang.sin()) * radial
+    };
+    for i in 0..steps {
+        let s0 = t.start + len * (i as f64) / (steps as f64);
+        let s1 = t.start + len * ((i + 1) as f64) / (steps as f64);
+        let (a0, b0, c0, d0, a1, b1, c1, d1) = {
+            let mut ring = |s: f64| {
+                (
+                    cosmetic_vertex(&mut mesh, place(s, root_r, -pitch_half)),
+                    cosmetic_vertex(&mut mesh, place(s, crest_r, -crest_half)),
+                    cosmetic_vertex(&mut mesh, place(s, crest_r, crest_half)),
+                    cosmetic_vertex(&mut mesh, place(s, root_r, pitch_half)),
+                )
+            };
+            let r0 = ring(s0);
+            let r1 = ring(s1);
+            (r0.0, r0.1, r0.2, r0.3, r1.0, r1.1, r1.2, r1.3)
+        };
+        for (p, q, r, s) in [(a0, b0, a1, b1), (b0, c0, b1, c1), (c0, d0, c1, d1)] {
+            cosmetic_face(&mut mesh, t.internal, t.axis_point, k, p, q, r);
+            cosmetic_face(&mut mesh, t.internal, t.axis_point, k, q, s, r);
+        }
+    }
+    for n in &mut mesh.normals {
+        if let Some(u) = n.normalized() {
+            *n = u;
+        }
+    }
+    mesh
+}
+
+fn cosmetic_vertex(mesh: &mut solidcraft_geom::Mesh, p: Vec3) -> u32 {
+    let i = mesh.positions.len() as u32;
+    mesh.positions.push(p);
+    mesh.normals.push(Vec3::ZERO);
+    i
+}
+
+fn cosmetic_face(mesh: &mut solidcraft_geom::Mesh, internal: bool, axis_point: Vec3, axis: Vec3, a: u32, b: u32, c: u32) {
+    let (Some(pa), Some(pb), Some(pc)) =
+        (mesh.positions.get(a as usize).copied(), mesh.positions.get(b as usize).copied(), mesh.positions.get(c as usize).copied())
+    else {
+        return;
+    };
+    let Some(mut n) = (pb - pa).cross(pc - pa).normalized() else { return };
+    let mid = (pa + pb + pc) / 3.0 - axis_point;
+    let outward = mid - axis * mid.dot(axis);
+    if internal == (n.dot(outward) > 0.0) {
+        n = -n;
+        mesh.triangles.push([a, c, b]);
+    } else {
+        mesh.triangles.push([a, b, c]);
+    }
+    for i in [a, b, c] {
+        if let Some(slot) = mesh.normals.get_mut(i as usize) {
+            *slot = *slot + n;
+        }
+    }
+}
+
+/// Cut a modelled thread's groove out of its body. `on_face` is a point on the cylindrical face.
+///
+/// Supported path: curved helical B-rep via local cylinder replacement (ruled B-spline flanks,
+/// analytic crest/root). Never silently facets the body. Unsupported cases (external shafts,
+/// partial-length threads, mismatched tap radius) return an explicit error. The legacy faceted
+/// boolean lives in [`cut_modeled_thread_faceted_legacy`] for comparison only.
+fn cut_modeled_thread(st: &mut ModelState, t: &ThreadInfo, on_face: Vec3) -> Result<()> {
+    let i = st.bodies.iter().position(|b| b.name == t.body).ok_or_else(|| DocError::Invalid("threaded body".into()))?;
+    let Some(mb) = st.bodies.get(i).cloned() else { return Err(DocError::Invalid("body".into())) };
+    let cyl = kernel::cylinder_face_at(&mb.body, on_face).ok_or_else(|| DocError::Invalid("no cylindrical face there to thread".into()))?;
+    let tol = t.pitch * 1e-3;
+    let open = ((t.start - cyl.start).abs() < tol, (t.end - cyl.end).abs() < tol);
+    if !t.internal {
+        return Err(DocError::Invalid(
+            "curved helical B-rep threading does not support external shafts yet; use a cosmetic thread".into(),
+        ));
+    }
+    if !open.0 || !open.1 {
+        return Err(DocError::Invalid(
+            "curved helical B-rep threading supports full-depth through-holes only for now; partial-length modelled threads are not supported yet".into(),
+        ));
+    }
+    // Validate profile depth using the same checks as the groove builder (without building a mesh).
+    let _ = thread_groove(t, cyl.radius, open)?;
+    let nb = kernel::try_replace_cylinder_with_helical_thread(&mb.body, on_face, t.major_diameter, t.pitch)
+        .map_err(|e| DocError::Invalid(format!("{e}")))?;
+    let lineage = mb.traced().lineage.and_then(|l| crate::lineage::Lineage::step(&nb, &[&l]));
+    let nb = Traced { body: nb, lineage };
+    if let Some(slot) = st.bodies.get_mut(i) {
+        *slot = ModelBody::traced_new(mb.name, nb, mb.feature);
+    }
+    Ok(())
+}
+
+/// Legacy faceted modelled-thread cut (kept for reference; production uses the curved path).
+#[allow(dead_code)]
+fn cut_modeled_thread_faceted_legacy(st: &mut ModelState, t: &ThreadInfo, on_face: Vec3) -> Result<()> {
+    let i = st.bodies.iter().position(|b| b.name == t.body).ok_or_else(|| DocError::Invalid("threaded body".into()))?;
+    let Some(mb) = st.bodies.get(i).cloned() else { return Err(DocError::Invalid("body".into())) };
+    let cyl = kernel::cylinder_face_at(&mb.body, on_face).ok_or_else(|| DocError::Invalid("no cylindrical face there to thread".into()))?;
+    let tol = t.pitch * 1e-3;
+    let groove = thread_groove(t, cyl.radius, ((t.start - cyl.start).abs() < tol, (t.end - cyl.end).abs() < tol))?;
+    let nb = kernel::faceted_boolean(&mb.body, &groove, BoolOp::Cut, t.pitch * 0.005)?
+        .ok_or_else(|| DocError::Invalid("the thread removed everything".into()))?;
+    let groove = crate::lineage::Lineage::unnamed_faces(groove.triangles.len());
+    let lineage = mb.traced().lineage.and_then(|l| crate::lineage::Lineage::step(&nb, &[&l, &groove]));
+    let nb = Traced { body: nb, lineage };
+    if let Some(slot) = st.bodies.get_mut(i) {
+        *slot = ModelBody::traced_new(mb.name, nb, mb.feature);
+    }
+    Ok(())
 }
 
 /// A constant fillet of `edges`; with [`FilletFit::Reduce`](crate::FilletFit::Reduce), a radius too
@@ -428,6 +599,12 @@ fn one_by_one(input: Traced, edges: &[Vec3], blend: impl Fn(&kernel::Body, Vec3)
         Some(prev) => Ok((b.body, prev)),
         None => Err(DocError::Invalid("no edges to fillet".into())),
     }
+}
+
+/// `Posts` for `Posts (1)`: the body a split piece was numbered after.
+fn split_piece_of(name: &str) -> Option<&str> {
+    let (base, n) = name.strip_suffix(')')?.rsplit_once(" (")?;
+    (!n.starts_with('0') && n.parse::<u32>().is_ok()).then_some(base)
 }
 
 /// Add `note` to a feature's warning.
@@ -1035,6 +1212,20 @@ fn placement_digest(doc: &Document, f: &Feature) -> u64 {
         }
         return hash.finish();
     }
+    // A network through 3D sketch curves reads their points through the components the
+    // feature and those sketches are placed in, as a sweep's wired path does.
+    if let FeatureKind::SurfaceNetwork { u, v, .. } = &f.kind {
+        let sketches: Vec<crate::SketchId> = u.iter().chain(v).filter_map(|c| c.sketch).collect();
+        if sketches.iter().any(wired) {
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            doc.component_transform(f.component).iter().flatten().for_each(|value| value.to_bits().hash(&mut hash));
+            for sketch in &sketches {
+                let owner = doc.feature(sketch.0).map(|feature| feature.component).unwrap_or(0);
+                doc.component_transform(owner).iter().flatten().for_each(|value| value.to_bits().hash(&mut hash));
+            }
+            return hash.finish();
+        }
+    }
     // To / From Object finds its target where that target's component is placed (#928).
     let to_object = match &f.kind {
         FeatureKind::Extrude { extent, .. } => extent.to.is_some() || extent.from.is_some(),
@@ -1267,7 +1458,7 @@ impl Model {
                 // the face along the hole's axis and never slides sideways to the face's nearest
                 // point when the face no longer reaches it.
                 let hole_axis = match &f.kind {
-                    FeatureKind::Hole { direction, points: None, .. } => direction.normalized(),
+                    FeatureKind::Hole { direction, points: None | Some(crate::SketchPoints { single: true, .. }), .. } => direction.normalized(),
                     _ => None,
                 };
                 let fst = face_point_state(doc, &state, &f.kind, f.component);
@@ -1750,8 +1941,9 @@ fn apply_traced(state: &mut ModelState, f: &Feature, tools: Vec<Traced>, op: Ope
         Operation::Cut | Operation::Intersect => {
             let bop = if op == Operation::Cut { BoolOp::Cut } else { BoolOp::Intersect };
             let tools = if op == Operation::Cut { clear_tools_as_one(tools) } else { tools };
-            let affected: std::collections::BTreeSet<String> =
-                target_idx.iter().filter_map(|i| state.bodies.get(*i).map(|b| b.name.clone())).collect();
+            // Each target's pieces before the cut: a body joined from separate pieces stays one.
+            let affected: std::collections::BTreeMap<String, usize> =
+                target_idx.iter().filter_map(|i| state.bodies.get(*i)).map(|b| (b.name.clone(), b.body.lumps().map_or(1, |l| l.len()))).collect();
             let mut remove = Vec::new();
             for &ti in &target_idx {
                 let Some(mut acc) = state.bodies.get(ti).map(|b| Some(b.traced())) else { continue };
@@ -1779,16 +1971,19 @@ fn apply_traced(state: &mut ModelState, f: &Feature, tools: Vec<Traced>, op: Ope
             let live: std::collections::BTreeSet<&str> = state.bodies.iter().map(|b| b.name.as_str()).collect();
             state.threads.retain(|t| live.contains(t.body.as_str()));
             // A cut can leave a body in pieces: each piece becomes its own body ("Bar", "Bar (1)"),
-            // numbered on past names already taken (a body cut in pieces before).
+            // numbered on past names already taken (a body cut in pieces before). Only a cut that
+            // made more pieces than the body had splits it: the pieces of a join stay together.
+            // Not yet: a cut that splits one piece of such a body still splits all of them; keeping
+            // the untouched ones together needs each new piece traced to the piece it came from.
             let mut taken: std::collections::BTreeSet<String> = state.bodies.iter().map(|b| b.name.clone()).collect();
             let mut split: Vec<ModelBody> = Vec::new();
             for mb in std::mem::take(&mut state.bodies) {
-                if !affected.contains(&mb.name) || state.sheets.iter().any(|s| s.body == mb.name) {
+                let Some(&had) = affected.get(&mb.name).filter(|_| !state.sheets.iter().any(|s| s.body == mb.name)) else {
                     split.push(mb);
                     continue;
-                }
+                };
                 let pieces = mb.body.lumps().unwrap_or_else(|_| vec![mb.body.clone()]);
-                if pieces.len() < 2 {
+                if pieces.len() <= had {
                     split.push(mb);
                     continue;
                 }
@@ -2655,7 +2850,7 @@ fn sketch_hole_dir(st: &ModelState, spots: &[Vec3], n: Vec3) -> Vec3 {
 fn hole_spots(vals: &BTreeMap<String, Value>, st: &ModelState, f: &Feature) -> Result<(Vec<Vec3>, Vec3)> {
     let FeatureKind::Hole { position, at, direction, points, .. } = &f.kind else { return Err(DocError::Invalid("not a hole".into())) };
     let (spots, dir) = match points {
-        Some(sp) => {
+        Some(sp) if !sp.single => {
             let ss =
                 st.sketch(sp.sketch.0).ok_or_else(|| DocError::Unknown(format!("sketch {} (it must come earlier in the timeline)", sp.sketch)))?;
             let mut v = Vec::new();
@@ -2667,9 +2862,9 @@ fn hole_spots(vals: &BTreeMap<String, Value>, st: &ModelState, f: &Feature) -> R
             let dir = if sp.flip { -dir } else { dir };
             (v, dir)
         }
-        None => {
+        _ => {
             let dir = direction.normalized().ok_or_else(|| DocError::Invalid("hole direction".into()))?;
-            let at = hole_on_surface(st, hole_position(vals, position, at)?, dir);
+            let at = hole_on_surface(st, single_hole_position(vals, st, position, at, points)?, dir);
             let dir = hole_dir_into_face(st, at, dir);
             return Ok((vec![hole_on_surface(st, at, dir)], dir));
         }
@@ -2706,7 +2901,7 @@ fn hole_depth_to(st: &ModelState, at: &Vec3, dir: Vec3, to: &Option<Vec3>, depth
 fn hole_spots_raw(vals: &BTreeMap<String, Value>, st: &ModelState, f: &Feature) -> Result<(Vec<Vec3>, Vec3)> {
     let FeatureKind::Hole { position, at, direction, points, .. } = &f.kind else { return Err(DocError::Invalid("not a hole".into())) };
     match points {
-        Some(sp) => {
+        Some(sp) if !sp.single => {
             let ss = st.sketch(sp.sketch.0).ok_or_else(|| DocError::Unknown(format!("sketch {}", sp.sketch)))?;
             let v: Vec<Vec3> =
                 sp.ids.iter().filter_map(|id| ss.sketch.points.iter().find(|p| &p.id == id)).map(|p| ss.plane.to_world(p.pos)).take(10_000).collect();
@@ -2714,12 +2909,28 @@ fn hole_spots_raw(vals: &BTreeMap<String, Value>, st: &ModelState, f: &Feature) 
             let dir = if sp.flip { -dir } else { dir };
             Ok((v, dir))
         }
-        None => {
+        _ => {
             let dir = direction.normalized().ok_or_else(|| DocError::Invalid("hole direction".into()))?;
-            let p = hole_position(vals, position, at)?;
+            let p = single_hole_position(vals, st, position, at, points)?;
             Ok((vec![p], hole_dir_into_face(st, hole_on_surface(st, p, dir), dir)))
         }
     }
+}
+
+/// Where a hole placed by position is drilled: at its sketch point where the sketch has it now,
+/// for a Single hole snapped to one (#2110), else as [`hole_position`].
+fn single_hole_position(
+    vals: &BTreeMap<String, Value>,
+    st: &ModelState,
+    position: &crate::FacePick,
+    at: &Option<crate::PointExpr>,
+    points: &Option<crate::SketchPoints>,
+) -> Result<Vec3> {
+    let Some(sp) = points else { return hole_position(vals, position, at) };
+    let ss = st.sketch(sp.sketch.0).ok_or_else(|| DocError::Unknown(format!("sketch {} (it must come earlier in the timeline)", sp.sketch)))?;
+    let id = sp.ids.first().ok_or_else(|| DocError::Invalid("a Single hole needs its sketch point".into()))?;
+    let p = ss.sketch.points.iter().find(|p| &p.id == id).ok_or_else(|| DocError::Unknown(format!("sketch point `{id}`")))?;
+    Ok(ss.plane.to_world(p.pos))
 }
 
 /// Where a hole placed by position is drilled: its `at` expressions evaluated, so it follows the
@@ -3065,7 +3276,8 @@ fn centered_extrude(plane: &Plane, region: &Region2, start: f64, end: f64, sketc
     };
     // Fit cap surfaces in their own coordinates. Fitting a distant world-space
     // wire can tilt an otherwise exact planar cap through numeric cancellation.
-    let bodies = kernel::extrude(&Plane::XY, std::slice::from_ref(region), start, end)?;
+    // A side drawn in collinear pieces is one face (#1788).
+    let bodies = kernel::extrude_whole_sides(&Plane::XY, std::slice::from_ref(region), start, end)?;
     if *plane == Plane::XY {
         return Ok(bodies.into_iter().map(|body| roles.tool(body, None)).collect());
     }
@@ -3176,21 +3388,30 @@ fn feature_tools_with_constructor(
             };
             if let Some(tp) = &extent.taper {
                 let taper = val(vals, tp, Kind::Angle)?;
-                if extent.distance2.is_some() || extent.start_offset.is_some() || extent.direction == crate::Direction::Symmetric {
-                    return Err(DocError::Invalid("not supported yet: taper with two-sided, symmetric or offset extents".into()));
+                if extent.distance2.is_some() || extent.direction == crate::Direction::Symmetric {
+                    return Err(DocError::Invalid("not supported yet: taper with two-sided or symmetric extents".into()));
                 }
                 let sign = if extent.to.is_none() && extent.direction == crate::Direction::Negative { -1.0 } else { 1.0 };
                 let (len, sign) = if d < 0.0 { (-d, -sign) } else { (d, sign) };
-                let start_plane = ss.plane.offset(from);
+                // Where the extrude starts: the From Object's level and a start offset along the
+                // normal from it. The offset moves the profile that far and the sides are drafted
+                // from there, so the profile stays the section at the start whatever the offset
+                // (`d` is measured from the start already, To Object included).
+                let base = from
+                    + match &extent.start_offset {
+                        Some(e) => val(vals, e, Kind::Length)?,
+                        None => 0.0,
+                    };
+                let start_plane = ss.plane.offset(base);
                 let caps = [
-                    Some(crate::lineage::extrude_cap_role(from)),
-                    Some(crate::lineage::extrude_cap_role(if sign < 0.0 { from - len } else { from + len })),
+                    Some(crate::lineage::extrude_cap_role(base)),
+                    Some(crate::lineage::extrude_cap_role(if sign < 0.0 { base - len } else { base + len })),
                 ];
                 // How far a tool grows past its profile at either end, at most.
                 let mut growth: f64 = 0.0;
                 // A face of the targets in the profile's plane (the same for every profile).
                 let plain_targets: Vec<String> = crate::plain(targets);
-                let on_face = matches!(operation, Operation::Join | Operation::Cut) && face_level_at(st, &ss.plane, from, &plain_targets);
+                let on_face = matches!(operation, Operation::Join | Operation::Cut) && face_level_at(st, &ss.plane, base, &plain_targets);
                 let surroundings = Surroundings::of(st, *operation, &plain_targets);
                 let tools: Vec<Traced> = regions
                     .iter()
@@ -3214,9 +3435,9 @@ fn feature_tools_with_constructor(
                             growth = growth.max(len * taper.tan().abs());
                             return Ok(roles.tool(exact, None));
                         }
-                        let (lo, hi) = if sign < 0.0 { (from - len, from) } else { (from, from + len) };
+                        let (lo, hi) = if sign < 0.0 { (base - len, base) } else { (base, base + len) };
                         let (l2, h2) = surroundings.as_ref().map_or((lo, hi), |sur| extend_for_coplanar(sur, &ss.plane, r, lo, hi));
-                        let (mut a, b) = if sign < 0.0 { (from - h2, from - l2) } else { (l2 - from, h2 - from) };
+                        let (mut a, b) = if sign < 0.0 { (base - h2, base - l2) } else { (l2 - base, h2 - base) };
                         // A taper that narrows the tool away from the face widens it as it runs on into it, past
                         // the profile (where the profile is the whole face, out through the body's sides, #1534):
                         // then it starts on the face instead.
@@ -4691,6 +4912,7 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
         | FeatureKind::SurfaceLoft { .. }
         | FeatureKind::SurfaceBlend { .. }
         | FeatureKind::SurfaceBoundary { .. }
+        | FeatureKind::SurfaceNetwork { .. }
         | FeatureKind::SurfaceMatch { .. }
         | FeatureKind::SurfaceFair { .. }
         | FeatureKind::SurfaceOffset { .. }
@@ -4768,7 +4990,7 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
             }
             apply_traced(st, f, tools, *operation, &crate::plain(targets))
         }
-        FeatureKind::Hole { thread, diameter, .. } => {
+        FeatureKind::Hole { thread, diameter, modeled, .. } => {
             let (spots, dir) = hole_spots(vals, st, f)?;
             let tools = hole_feature_tools(vals, st, f)?;
             let handled = sheet_hole_cut(st, f, &tools, warning)?;
@@ -4784,7 +5006,11 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
                 for p in spots {
                     let wall = p + dir.any_perp() * r + dir * (r * 0.5);
                     let t = thread_on(st, f.id, wall, Some(d), None)?;
-                    st.threads.push(t);
+                    if *modeled {
+                        cut_modeled_thread(st, &t, wall)?;
+                    } else {
+                        st.threads.push(t);
+                    }
                 }
             }
             Ok(())
@@ -4799,23 +5025,7 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
                 st.threads.push(t);
                 return Ok(());
             }
-            let i = st.bodies.iter().position(|b| b.name == t.body).ok_or_else(|| DocError::Invalid("threaded body".into()))?;
-            let Some(mb) = st.bodies.get(i).cloned() else { return Err(DocError::Invalid("body".into())) };
-            let cyl = kernel::cylinder_face_at(&mb.body, face.0).ok_or_else(|| DocError::Invalid("no cylindrical face there to thread".into()))?;
-            let tol = t.pitch * 1e-3;
-            let groove = thread_groove(&t, cyl.radius, ((t.start - cyl.start).abs() < tol, (t.end - cyl.end).abs() < tol))?;
-            // The B-rep boolean can't take helical walls in reasonable time: the body is cut
-            // faceted (curved faces within a two-hundredth of the pitch).
-            let nb = kernel::faceted_boolean(&mb.body, &groove, BoolOp::Cut, t.pitch * 0.005)?
-                .ok_or_else(|| DocError::Invalid("the thread removed everything".into()))?;
-            // The groove's faces are its triangles, with no role to name them by.
-            let groove = crate::lineage::Lineage::unnamed_faces(groove.triangles.len());
-            let lineage = mb.traced().lineage.and_then(|l| crate::lineage::Lineage::step(&nb, &[&l, &groove]));
-            let nb = Traced { body: nb, lineage };
-            if let Some(slot) = st.bodies.get_mut(i) {
-                *slot = ModelBody::traced_new(mb.name, nb, mb.feature);
-            }
-            Ok(())
+            cut_modeled_thread(st, &t, face.0)
         }
         FeatureKind::Shell { faces, thickness, body, direction, tangent_chain } => {
             let t = val(vals, thickness, Kind::Length)?;
@@ -5226,10 +5436,28 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
             }
             let mut tb = Vec::new();
             for t in tools {
-                tb.push(st.body(t).ok_or_else(|| DocError::Unknown(format!("body `{t}`")))?.traced());
+                match st.body(t) {
+                    Some(b) => tb.push(b.traced()),
+                    // Designs saved before #2247 combined the pieces a cut split off a body that
+                    // was already several pieces (`Posts`, `Posts (1)`). A cut keeps them in one
+                    // body now: the piece is in `Posts`, which is a tool too or the body joined to.
+                    None => match split_piece_of(t) {
+                        Some(base)
+                            if st.body(base).is_some()
+                                && (tools.iter().any(|o| **o == *base)
+                                    || (**target == *base && matches!(operation, Operation::Join | Operation::NewBody))) =>
+                        {
+                            append_warning(warning, format!("`{t}` is part of `{base}` now"));
+                        }
+                        _ => return Err(DocError::Unknown(format!("body `{t}`"))),
+                    },
+                }
             }
             if st.body(target).is_none() {
                 return Err(DocError::Unknown(format!("body `{target}`")));
+            }
+            if tb.is_empty() && !tools.is_empty() {
+                return Ok(()); // the pieces were all joined back into the body they are part of
             }
             let op = if *operation == Operation::NewBody { Operation::Join } else { *operation };
             apply_traced(st, f, tb, op, std::slice::from_ref(&target.0))?;
