@@ -268,6 +268,9 @@ fn plan_face(
     // boundary in turn: Delaunay with sag refinement meshes it (the patch layouts below assume
     // boundary all round, and leave fans across the strip's corners off the surface).
     let seamed = !wound.is_empty();
+    // Seam cuts that wind against the absolute surface (internal holes) or that only succeed
+    // after reversing rim loops need their triangles flipped for a consistent signed volume.
+    let mut seam_sense_flipped = false;
     match wound.as_slice() {
         [] => {}
         [d] => {
@@ -276,7 +279,7 @@ fn plan_face(
             // absolute wires that wind against the absolute surface in (u, v). Retry: reverse the
             // once-around loops (rim circles) first so a helical window keeps its hole sense, then
             // reverse every loop (#1289 / modelled threads).
-            projected = match seam::cut(s, &projected, *d, per, rules, h) {
+            let cut = match seam::cut(s, &projected, *d, per, rules, h) {
                 Some(cut) => cut,
                 None => {
                     let mut rim_rev = projected.clone();
@@ -287,19 +290,27 @@ fn plan_face(
                         }
                     }
                     match seam::cut(s, &rim_rev, *d, per, rules, h) {
-                        Some(cut) => cut,
+                        Some(mut cut) => {
+                            // Rim reverse already flips UV sense relative to the absolute wires.
+                            cut.inverted = !cut.inverted;
+                            cut
+                        }
                         None => {
                             let mut all_rev = projected.clone();
                             for l in &mut all_rev {
                                 l.uv.reverse();
                                 l.pts.reverse();
                             }
-                            seam::cut(s, &all_rev, *d, per, rules, h)
-                                .ok_or_else(|| fail("boundary winds around the surface"))?
+                            let mut cut = seam::cut(s, &all_rev, *d, per, rules, h)
+                                .ok_or_else(|| fail("boundary winds around the surface"))?;
+                            cut.inverted = !cut.inverted;
+                            cut
                         }
                     }
                 }
             };
+            seam_sense_flipped = cut.inverted;
+            projected = cut.loops;
         }
         _ => return Err(fail("boundary winds around the surface both ways")),
     }
@@ -443,6 +454,11 @@ fn plan_face(
     triangles.retain(|t| !(pole_pair(t[0], t[1]) || pole_pair(t[1], t[2]) || pole_pair(t[2], t[0])));
     if !closed_boundary(&ranges, &fixed, &triangles) {
         return Err(fail("triangulation does not follow the boundary"));
+    }
+    if seam_sense_flipped {
+        for t in &mut triangles {
+            t.swap(1, 2);
+        }
     }
     let mut all = uvs;
     all.extend(extra);

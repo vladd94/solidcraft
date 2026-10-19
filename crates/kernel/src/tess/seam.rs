@@ -52,11 +52,20 @@ struct Piece {
     pts: Vec<Vec3>,
 }
 
+/// Result of [`cut`]: closed loops in one period, and whether the face wound against the usual
+/// left-of-boundary sense (internal hole walls). Callers that triangulate may need to flip
+/// triangle winding when `inverted` is set so signed volume matches the solid.
+#[derive(Clone, Debug)]
+pub(crate) struct CutLoops {
+    pub loops: Vec<Loop>,
+    pub inverted: bool,
+}
+
 /// Cut a face whose loops wind around direction `d` (period `per`) into one period. The face
 /// lies left of its loops in (u, v). Internal hole walls may wind the other way; those
 /// (below, above) crossing pairs are linked left-up / right-down. `None` when the loops cannot
 /// be cut cleanly (the face would be unbounded along the line, or the two lines disagree).
-pub(crate) fn cut(s: &EvalSurface, loops: &[Loop], d: usize, per: f64, rules: &Rules, h: f64) -> Option<Vec<Loop>> {
+pub(crate) fn cut(s: &EvalSurface, loops: &[Loop], d: usize, per: f64, rules: &Rules, h: f64) -> Option<CutLoops> {
     if !(per > 0.0 && per.is_finite()) || loops.is_empty() {
         return None;
     }
@@ -298,21 +307,24 @@ pub(crate) fn cut(s: &EvalSurface, loops: &[Loop], d: usize, per: f64, rules: &R
         })
         .sum();
     // Inverted (face-right) windings can leave a negative signed area; reverse those loops so
-    // downstream triangulation sees face-left boundaries.
+    // downstream triangulation sees face-left boundaries. Report `inverted` so the caller can
+    // flip triangle winding for a consistent solid volume.
     if area == 0.0 {
         None
     } else if area > 0.0 {
-        Some(out)
+        Some(CutLoops { loops: out, inverted })
     } else {
-        Some(
-            out.into_iter()
+        Some(CutLoops {
+            inverted: true,
+            loops: out
+                .into_iter()
                 .map(|mut l| {
                     l.uv.reverse();
                     l.pts.reverse();
                     l
                 })
                 .collect(),
-        )
+        })
     }
 }
 
