@@ -240,9 +240,11 @@ fn internal_thread_display_plan_clears_the_bore() {
         }
     }
     assert!(top_loops >= 2 && bot_loops >= 2, "top={top_loops} bot={bot_loops}");
+    // Plane-trimmed entries leave a scalloped hole; reject only tris that chord across the
+    // clear central bore (display plan mesh is authoritative for #1289).
     let mut spanning = 0usize;
-    for t in &tess.triangles {
-        let Some([a, b, c]) = tess.tri(t) else { continue };
+    for t in &mesh.triangles {
+        let Some([a, b, c]) = mesh.tri(t) else { continue };
         let n = (b - a).cross(c - a);
         let area = n.len();
         if area < 1e-12 {
@@ -253,7 +255,7 @@ fn internal_thread_display_plan_clears_the_bore() {
         }
         let centroid = (a + b + c) / 3.0;
         let r = ((centroid.x - cx).powi(2) + (centroid.y - cy).powi(2)).sqrt();
-        if r < tap - 0.35 {
+        if r < 0.5 {
             spanning += 1;
         }
     }
@@ -300,4 +302,120 @@ fn external_ridge_matches_display_fixture_topology() {
     assert!(cylinders >= 2 && unknown >= 2, "cyl={cylinders} flank={unknown}");
 }
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#[test]
+fn trimmed_entry_has_no_artificial_end_face() {
+    let stock = box_solid(Vec3::ZERO, Vec3::new(40.0, 50.0, 10.0)).unwrap();
+    let tap = tap_radius(5.0, 0.8);
+    let hole = cylinder(Vec3::new(20.0, 25.0, -1.0), Vec3::Z, tap, 12.0).unwrap();
+    let plate = boolean(&stock, &hole, BoolOp::Cut).unwrap().unwrap();
+    let on = Vec3::new(20.0, 25.0 + tap, 5.0);
+    let threaded = try_replace_cylinder_with_helical_thread(&plate, on, 5.0, 0.8).expect("trim replace");
+    assert!(threaded.validity().is_empty(), "{:?}", threaded.validity());
+    assert!(!threaded.is_surface());
+    let origin = Vec3::new(20.0, 25.0, 0.0);
+    // No radial planar end-cap inside the bore (the old rectangular termination).
+    for i in 0..threaded.face_count() {
+        let Some(FaceSurface::Plane { point, normal }) = face_surface(&threaded, i) else { continue };
+        let n = normal.normalized().unwrap_or(Vec3::Z);
+        if n.z.abs() > 0.85 {
+            continue;
+        }
+        let along = point.z;
+        let rad = ((point.x - origin.x).powi(2) + (point.y - origin.y).powi(2)).sqrt();
+        assert!(
+            !(rad < tap + 0.7 && along > 0.3 && along < 9.7),
+            "artificial radial end face at {point:?} n={n:?}"
+        );
+    }
+    // Entry/exit hole wires lie on the plate planes.
+    for (z_face, label) in [(0.0, "bottom"), (10.0, "top")] {
+        let mut samples = 0usize;
+        for i in 0..threaded.face_count() {
+            let Some(FaceSurface::Plane { point, normal }) = face_surface(&threaded, i) else { continue };
+            let n = normal.normalized().unwrap_or(Vec3::Z);
+            if (point.z - z_face).abs() > 1e-3 || n.z.abs() < 0.9 {
+                continue;
+            }
+            let f = threaded.solid.face_iter().nth(i).expect("face");
+            for w in f.absolute_boundaries().iter().skip(1) {
+                for e in w.edge_iter() {
+                    use truck_modeling::{BoundedCurve, ParametricCurve};
+                    let c = e.curve();
+                    let (t0, t1) = c.range_tuple();
+                    for k in 0..=4 {
+                        let t = t0 + (t1 - t0) * k as f64 / 4.0;
+                        let p = crate::body::from_p3(c.subs(t));
+                        let r = ((p.x - origin.x).powi(2) + (p.y - origin.y).powi(2)).sqrt();
+                        if r < 2.6 {
+                            assert!((p.z - z_face).abs() < 1e-3, "{label} entry off plane: {p:?}");
+                            samples += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(samples >= 8, "{label} entry samples={samples}");
+    }
+    assert!(!threaded.contains(Vec3::new(20.0, 25.0, 5.0)), "bore must be empty");
+}
+
+#[test]
+fn plate_with_trimmed_thread_is_closed_curved() {
+    let b = crate::plate_with_trimmed_internal_thread(40.0, 50.0, 10.0, (12.0, 25.0), (28.0, 25.0), 5.0, 0.8).expect("trimmed PoC");
+    assert!(b.validity().is_empty(), "{:?}", b.validity());
+    assert!(!b.is_surface());
+    let (_, cylinders, _, unknown) = count_surfaces(&b);
+    assert!(unknown >= 2 && cylinders >= 3, "cyl={cylinders} flank={unknown}");
+    let (plan, _) = crate::tess::plan(&b.solid, 2e-3, None).expect("display plan");
+    let mesh = plan.evaluate();
+    assert!(mesh.raycast(Vec3::new(28.0, 25.0, 12.0), Vec3::new(0.0, 0.0, -1.0)).is_none());
+}
+
+
+#[test]
+fn entry_has_no_radial_end_cap_after_plane_trim() {
+    // Locks the shippable plane-trim generation: no artificial radial end-cap inside the bore.
+    // Constant-z flank chords at the entry plane remain a known visual limitation; progressive
+    // plane∩flank work is preserved in commit 14a415e6 / artifacts/progressive-*.
+    let stock = box_solid(Vec3::ZERO, Vec3::new(40.0, 50.0, 10.0)).unwrap();
+    let tap = tap_radius(5.0, 0.8);
+    let hole = cylinder(Vec3::new(20.0, 25.0, -1.0), Vec3::Z, tap, 12.0).unwrap();
+    let plate = boolean(&stock, &hole, BoolOp::Cut).unwrap().unwrap();
+    let on = Vec3::new(20.0, 25.0 + tap, 5.0);
+    let threaded = try_replace_cylinder_with_helical_thread(&plate, on, 5.0, 0.8).expect("trim");
+    assert!(threaded.validity().is_empty(), "{:?}", threaded.validity());
+    assert!(!threaded.is_surface());
+    let origin = Vec3::new(20.0, 25.0, 0.0);
+    for i in 0..threaded.face_count() {
+        let Some(FaceSurface::Plane { point, normal }) = face_surface(&threaded, i) else { continue };
+        let n = normal.normalized().unwrap_or(Vec3::Z);
+        if n.z.abs() > 0.85 {
+            continue;
+        }
+        let rad = ((point.x - origin.x).powi(2) + (point.y - origin.y).powi(2)).sqrt();
+        assert!(
+            !(rad < tap + 0.7 && point.z > 0.3 && point.z < 9.7),
+            "radial end face at {point:?}"
+        );
+    }
+    assert!(!threaded.contains(Vec3::new(20.0, 25.0, 5.0)), "bore must be empty");
+}
 

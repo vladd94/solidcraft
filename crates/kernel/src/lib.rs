@@ -51,8 +51,10 @@ pub mod fuzz;
 mod heal;
 mod helix;
 mod helical_thread;
+mod helical_thread_trim;
 #[cfg(test)]
 mod helical_thread_tests;
+mod helical_meridional_poc;
 pub mod history;
 mod iges_in;
 mod iges_out;
@@ -182,6 +184,8 @@ pub use helical_thread::{
     HELIX_PIECE, external_ridge_thread, helix_approximation_errors, internal_thread_tube, plate_with_plain_and_internal_thread, tap_radius,
     try_replace_cylinder_with_helical_thread, try_replace_external_cylinder_with_helical_thread,
 };
+pub use helical_thread_trim::{internal_thread_wall_trimmed, plate_with_trimmed_internal_thread};
+
 pub use iges_in::{MAX_IGES_BYTES, iges_import, iges_to_step};
 pub use iges_out::iges_export_bodies;
 pub use lip::{raise_band, rim_band};
