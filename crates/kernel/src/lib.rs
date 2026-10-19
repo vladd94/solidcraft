@@ -52,6 +52,8 @@ mod helical_thread;
 mod helical_thread_trim;
 #[cfg(test)]
 mod helical_thread_tests;
+/// Experimental meridional flank + plane∩ entry PoC (not production threading).
+mod helical_meridional_poc;
 pub mod history;
 mod iges_in;
 mod iges_out;
