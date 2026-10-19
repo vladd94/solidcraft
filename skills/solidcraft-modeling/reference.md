@@ -75,7 +75,8 @@ Distances are unsigned. Draw the geometry on the correct side first, and the dim
 | `sketch.slot.overall` / `sketch.slot.center_to_center` | `p0`, `p1` (overall ends / arc centres), `width` | Ids and dof are in the "Ids" section above. |
 | `solid.fillet` / `solid.chamfer` | `edges:[[x,y,z]]`, `radius` / `distance` | The pick snaps to the **nearest** edge, with no distance limit and no error, so check that the face count changed. One pick takes the whole tangent chain: a rounded rim needs 1 point, not 8. |
 | `solid.shell` | `faces:[[x,y,z]]`, `thickness` | A point on each face to remove, or its name from `body_topology`. Fillet first, except an edge of a removed face (see Order in `SKILL.md`). |
-| `solid.hole` | `position:[x,y,z]` on a face (numbers or length expressions such as `["40", "width/2", "t"]`, which the hole then follows) + `diameter`, or `sketch` (+ `points`) | `clearance:"M3"`. `depth` defaults to through all. `type` is one of simple/drilled/counterbore/countersink. A `countersink` needs `cs_diameter` and `cs_angle`; a `counterbore` needs `cb_diameter` and `cb_depth`. `position` is a fixed point. |
+| `solid.hole` | `position:[x,y,z]` on a face (numbers or length expressions such as `["40", "width/2", "t"]`, which the hole then follows) + `diameter`, or `sketch` (+ `points`) | `clearance:"M3"`. `thread:"M5"` (or `"M5x0.8"`) uses the conventional tap-drill diameter (M5 → 4.2 mm). `depth` defaults to through all. `type` is one of simple/drilled/counterbore/countersink. A `countersink` needs `cs_diameter` and `cs_angle`; a `counterbore` needs `cb_diameter` and `cb_depth`. `modeled:true` on the hole cuts a helical wall for a single hole; for **several** modeled holes see below. `position` is a fixed point. |
+| `solid.thread` | `face:[x,y,z]` on the bore wall, `designation:"M5"`, optional `modeled:true` | Cosmetic by default (annotation + helix display). `modeled:true` replaces the cylinder with a curved helical B-rep wall. Internal through-holes only today. |
 | `solid.pattern.rectangular` | `features`, `dir1`, `count1`, `spacing1` (+ `dir2`, `count2`, `spacing2`) | Spacing takes expressions and follows parameters. |
 | `solid.pattern.circular` | `features`, `axis` (`"Z"` or `{origin, dir}`), `count` | `angle` defaults to 360 deg. A full pattern keeps the COM on the axis, so check its radius with a top-view screenshot. |
 | `solid.mirror` | `features:[names]`, `plane` (`XY`/`XZ`/`YZ`, a construction plane, or `{origin, normal}` whose origin may use length expressions) | Follows parameters. Mirror and pattern features cannot be mirrored or patterned again. |
@@ -89,6 +90,58 @@ Distances are unsigned. Draw the geometry on the correct side first, and the dim
   Both the radius and the count follow their parameters.
 - **Several parameter changes:** use one `batch` of `parameters.change` steps instead of one `set_parameter` call each.
 - **Primitive booleans:** a `solid.box` or `solid.cylinder` cut that touches curved faces of the target can fail with `the exact fallback ... takes planar faces only`. Use a sketch profile and an extrude cut instead, for example a slot sketch rather than a box plus 2 cylinders.
+
+## Modeled tapped holes (several holes)
+
+Curved helical B-rep threads (`modeled: true`) are supported for **internal through-holes**.
+
+**Do not** call `solid.hole` with `"modeled": true` for the second, third, … hole on the same
+body: drilling into a shell that already has helical walls can trip the B-rep boolean guard.
+Instead:
+
+1. Create every hole with `solid.hole` and `"thread":"M5"` (plain tap-drill bore, cosmetic thread).
+2. Then for each bore call `solid.thread` with `"modeled": true` and `face` on the cylinder wall
+   (e.g. `[cx, cy + tap_radius, mid_z]` — M5 tap radius is 2.1 mm).
+
+Example: 50×50×10 plate, four M5×0.8 modeled through-holes at inset 12.5 mm:
+
+```json
+{"commands":[
+ {"command":"file.new","params":{"name":"Plate50_4xM5"}},
+ {"command":"solid.box","params":{"length":50,"width":50,"height":10,"body_name":"Plate"}},
+ {"command":"solid.hole","params":{"position":[12.5,12.5,10],"thread":"M5","depth":10,"type":"drilled","tip_angle":118}},
+ {"command":"solid.hole","params":{"position":[37.5,12.5,10],"thread":"M5","depth":10,"type":"drilled","tip_angle":118}},
+ {"command":"solid.hole","params":{"position":[12.5,37.5,10],"thread":"M5","depth":10,"type":"drilled","tip_angle":118}},
+ {"command":"solid.hole","params":{"position":[37.5,37.5,10],"thread":"M5","depth":10,"type":"drilled","tip_angle":118}},
+ {"command":"solid.thread","params":{"face":[12.5,14.6,5],"designation":"M5","modeled":true}},
+ {"command":"solid.thread","params":{"face":[37.5,14.6,5],"designation":"M5","modeled":true}},
+ {"command":"solid.thread","params":{"face":[12.5,39.6,5],"designation":"M5","modeled":true}},
+ {"command":"solid.thread","params":{"face":[37.5,39.6,5],"designation":"M5","modeled":true}}
+]}
+```
+
+Expected: bbox `[0,0,0]–[50,50,10]`, volume ≈ 24359 mm³ (plain plate 25000; four Ø4.2 through
+bores remove ≈554 mm³ before thread flanks cut a little more). Validity empty; face types include
+cylinders plus non-analytic helical flanks.
+
+Control-channel / Cloud Agent automation: `skills/solidcraft-modeling/scripts/export_plate_holes.py`.
+
+## Export design JSON and STEP (and local downloads)
+
+```json
+{"command":"file.export","params":{"path":"/opt/cursor/artifacts/Part.json","format":"json"}}
+{"command":"file.export","params":{"path":"/opt/cursor/artifacts/Part.step","format":"step"}}
+```
+
+On the control channel, every write needs `allow_paths` covering the destination folder
+(`docs/control-protocol.md`). Copy outputs into `/opt/cursor/artifacts/` so the agent UI lists them.
+
+**Local browser downloads for the user:** gist tokens and many temp hosts fail in Cloud Agents.
+Push the files on a branch under `downloads/` and give raw GitHub URLs:
+
+`https://raw.githubusercontent.com/<owner>/<repo>/<commit-sha>/downloads/<file>`
+
+Also link the `blob/` page so the user can click **Download raw file**.
 
 ## Worked example: parametric plate with 4 counterbored holes (1 batch)
 

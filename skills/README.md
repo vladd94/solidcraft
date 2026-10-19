@@ -50,3 +50,5 @@ Copy-Item -Recurse solidcraft\skills\solidcraft-* $HOME\.claude\skills\
 - `solidcraft-checking/scripts/tests` checks that skill's helpers, its traps and conventions, and the facts behind the corrections in `solidcraft-modeling`: `PYTHONDONTWRITEBYTECODE=1 uv run --no-project --with pytest --with build123d pytest -p no:cacheprovider skills/solidcraft-checking/scripts/tests`. The tests run the `solidcraft-cli` on `PATH`, not the workspace build, and CI does not run them.
 - When a command, a parameter name or a behaviour that these files describe changes, update them in the same PR.
 - Facts that describe current limitations, such as edge picks without a distance limit, should go once the limitation is fixed.
+- Cloud Agent helpers that drive the desktop control channel (for example
+  `solidcraft-modeling/scripts/export_plate_holes.py`) stay next to the skill that documents them.

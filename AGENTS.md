@@ -180,13 +180,33 @@ The environment install selects Rust stable (1.95 or newer, with rustfmt, clippy
 The base image's Rust is older than `Cargo.toml`'s `rust-version`; trust `rustup show` after install.
 
 `start` runs Xvfb on display `:99` when that server is not already up (1600×1000). This desktop
-image also has display `:1`. Run the desktop app with `DISPLAY=:99` when `:1` is absent:
-`DISPLAY=:99 cargo run -p solidcraft -- --sample --control PORT`.
+image also has TigerVNC / noVNC on display `:1` (XFCE) — that is what **Take Control** shows.
+- For the user to see the app: `DISPLAY=:1 ./target/release/solidcraft --control PORT` (not `:99`).
+- For agent-only headless UI work when `:1` is absent: `DISPLAY=:99 …`.
+- An app already on `:99` is invisible in Take Control; stop it and relaunch on `:1`.
 
 Headless modeling does not need a display: `solidcraft-cli eval`, `run`, and `snapshot`.
 Mesa llvmpipe is the software Vulkan/OpenGL adapter (`solidcraft-cli gpu`). A libEGL `DRI3`
 warning under Xvfb or this desktop is expected; the app still selects Vulkan.
 `SOLIDCRAFT_GPU=cpu` forces the CPU rasterizer for snapshots.
+
+### Build a plate, export JSON/STEP, give local downloads
+
+When the user asks to create a part and download it locally, follow this recipe (also in
+`skills/solidcraft-modeling/reference.md` and `skills/solidcraft-modeling/scripts/export_plate_holes.py`):
+
+1. Run SolidCraft on `DISPLAY=:1` with `--control PORT` (release binary preferred).
+2. Drive it over the control channel (`docs/control-protocol.md`); pass
+   `"allow_paths": ["/opt/cursor/artifacts", "/tmp"]` on requests that write files.
+3. Multi-hole **modeled** M5×0.8 (curved B-rep): drill every hole first (cosmetic / plain tap
+   drill), then `solid.thread` with `"modeled": true` on each bore — do not drill a new hole
+   into a body that already has helical walls.
+4. Export with `file.export` (`format: json` and `format: step`) into `/opt/cursor/artifacts/`.
+5. For a **browser download link on the user's machine**: commit the files under `downloads/`
+   on a `cursor/…-8929` branch, push, and give
+   `https://raw.githubusercontent.com/<owner>/<repo>/<sha>/downloads/<file>` (and the
+   `blob/…` “Download raw file” page). Gist create often lacks token scope; temp file hosts
+   are often blocked. Artifacts under `/opt/cursor/artifacts/` also appear in the agent UI.
 
 ## Roadmap
 `ROADMAP.md` (committed) tracks status, milestones and estimates. Update it whenever a
