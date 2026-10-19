@@ -393,9 +393,11 @@ fn thread_groove(t: &ThreadInfo, radius: f64, open: (bool, bool)) -> Result<soli
     let k = t.axis;
     let u = k.cross(if k.x.abs() < 0.9 { Vec3::new(1.0, 0.0, 0.0) } else { Vec3::new(0.0, 1.0, 0.0) });
     let u = u.normalized().ok_or_else(|| DocError::Invalid("thread axis".into()))?;
-    // Past a free end of the face the groove runs out into the air; elsewhere it stops square
-    // at the threaded length's end.
-    let (s0, s1) = (if open.0 { t.start - p } else { t.start }, if open.1 { t.end + p } else { t.end });
+    // The groove runs over the threaded length only. A one-pitch extension past a free end
+    // (`start − pitch` / `end + pitch`) made the profile fully developed at the entry plane;
+    // the curved B-rep path starts at the rim with a partial first turn instead.
+    let _ = open;
+    let (s0, s1) = (t.start, t.end);
     let base = t.axis_point + k * s0;
     let plane = Plane { origin: base, x: u, y: k };
     let section = [Vec2::new(r0, -w0), Vec2::new(r1, -w1), Vec2::new(r1, w1), Vec2::new(r0, w0)];

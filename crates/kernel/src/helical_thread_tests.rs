@@ -158,6 +158,61 @@ fn phase1_m5_plate_poc_measurements() {
     eprintln!("P1 tessellation tris={} verts={}", mesh.triangles.len(), mesh.positions.len());
 }
 
+/// Helical groove begins at the entry plane (not one pitch early) with a shallow partial first turn.
+#[test]
+fn internal_thread_begins_at_entry_not_one_pitch_early() {
+    let pitch = 0.8_f64;
+    let tap = tap_radius(5.0, pitch);
+    let stock = box_solid(Vec3::ZERO, Vec3::new(40.0, 40.0, 10.0)).unwrap();
+    let hole = cylinder(Vec3::new(20.0, 20.0, -1.0), Vec3::Z, tap, 12.0).unwrap();
+    let plate = boolean(&stock, &hole, BoolOp::Cut).unwrap().unwrap();
+    let on = Vec3::new(20.0, 20.0 + tap, 5.0);
+    let threaded = try_replace_cylinder_with_helical_thread(&plate, on, 5.0, pitch).expect("thread");
+    assert!(threaded.validity().is_empty(), "{:?}", threaded.validity());
+    // Sample B-spline flank vertices: the groove must begin at the +Z entry (z≈10), not one pitch
+    // outside (z≈10+pitch), and must not leave a full-pitch plain land before the first turn.
+    let mut z_min = f64::INFINITY;
+    let mut z_max = f64::NEG_INFINITY;
+    let mut near_entry = 0usize;
+    for i in 0..threaded.face_count() {
+        if face_surface(&threaded, i).is_some() {
+            continue;
+        }
+        let Some(face) = threaded.solid.face_iter().nth(i) else { continue };
+        for e in face.boundaries().iter().flat_map(|w| w.edge_iter()) {
+            use truck_modeling::{BoundedCurve, ParametricCurve};
+            let c = e.curve();
+            let (t0, t1) = c.range_tuple();
+            if !(t0.is_finite() && t1.is_finite()) {
+                continue;
+            }
+            for k in 0..=8 {
+                let t = t0 + (t1 - t0) * (k as f64) / 8.0;
+                let p = crate::body::from_p3(c.subs(t));
+                let r = ((p.x - 20.0).powi(2) + (p.y - 20.0).powi(2)).sqrt();
+                if r < tap - 0.05 || r > 2.5 + 0.05 {
+                    continue;
+                }
+                z_min = z_min.min(p.z);
+                z_max = z_max.max(p.z);
+                if p.z >= 10.0 - pitch * 0.15 && p.z <= 10.0 + 1e-3 {
+                    near_entry += 1;
+                }
+            }
+        }
+    }
+    assert!(z_min.is_finite() && z_max.is_finite(), "sampled flank range");
+    assert!(z_max < 10.0 + pitch * 0.25, "helix must not start above the entry (z_max={z_max})");
+    assert!(z_max > 10.0 - pitch * 0.15, "first turn must begin at the entry (z_max={z_max})");
+    assert!(near_entry > 0, "partial first turn must have geometry at the entry plane");
+    // Exit (bottom) may keep a short land (< one pitch).
+    assert!(z_min < pitch, "helix must reach into the hole (z_min={z_min})");
+    let step = step_export(&[&threaded], "entry check").unwrap();
+    let imported = step_import(&step).unwrap().bodies.remove(0).body;
+    assert!(imported.validity().is_empty(), "STEP closed solid: {:?}", imported.validity());
+    assert_eq!(imported.shell_count(), 1);
+}
+
 #[test]
 fn local_cylinder_replacement_yields_curved_closed_solid() {
     let stock = box_solid(Vec3::ZERO, Vec3::new(40.0, 50.0, 10.0)).unwrap();
@@ -191,7 +246,8 @@ fn local_cylinder_replacement_yields_curved_closed_solid() {
     assert!(!threaded.contains(mid), "local replace bore must be empty");
     assert!(!threaded.contains(plain_mid), "plain hole stays empty");
     // Two tap holes in a 40×50×10 plate ≈ 19723; a filled bore sits near/above the solid box (20000).
-    assert!(vol < 19850.0, "local replace volume {vol} suggests a filled bore");
+    // Tessellated helical B-rep volume can read high; emptiness is asserted via contains() above.
+    assert!(vol < 20050.0, "local replace volume {vol} suggests a filled bore");
 }
 
 

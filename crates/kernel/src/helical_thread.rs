@@ -39,7 +39,8 @@ fn helix_edge(origin: Vec3, axis: Vec3, u: Vec3, r: f64, z0: f64, pitch: f64, a0
     let k = axis.normalized().ok_or_else(|| KernelError::Invalid("helix axis".into()))?;
     let u = u.normalized().ok_or_else(|| KernelError::Invalid("helix radial".into()))?;
     let v = k.cross(u);
-    if !(r.is_finite() && r > 0.0 && pitch.is_finite() && pitch > 0.0 && a0.is_finite() && a1.is_finite() && (a1 - a0).abs() > 1e-12) {
+    // Pitch may be negative (internal through-hole: advance from the +axis entry toward −axis).
+    if !(r.is_finite() && r > 0.0 && pitch.is_finite() && pitch.abs() > 0.0 && a0.is_finite() && a1.is_finite() && (a1 - a0).abs() > 1e-12) {
         return Err(KernelError::Invalid("helix parameters".into()));
     }
     let n = (((a1 - a0).abs() / HELIX_PIECE).ceil() as usize).max(1);
@@ -54,6 +55,38 @@ fn helix_edge(origin: Vec3, axis: Vec3, u: Vec3, r: f64, z0: f64, pitch: f64, a0
         ctrl.extend([at(s) + turn(s) + rise, at(e) - turn(e) - rise, at(e)]);
     }
     Ok(EdgeSpec::Chain { degree: 3, ctrl: ctrl.into() })
+}
+
+/// Helix window for an internal through-hole. Coordinates are along `+axis` from `origin`.
+///
+/// The groove **starts at the +axis end of the hole** (the usual drill entry when the hole is cut
+/// from the top face): the first crest tip sits at `z_hi − tip`, and the helix advances toward
+/// `z_lo` with **negative** pitch so into-hole Z = 0 is the entry, not `start − pitch`.
+///
+/// Returns `(z0_centreline_at_angle_0, signed_pitch, turns)`.
+fn internal_helix_placement(z_lo: f64, z_hi: f64, pitch: f64, a0: f64, foot: f64) -> Result<(f64, f64, f64)> {
+    let height = z_hi - z_lo;
+    // Rim clearance for a meshable crest band — well below one pitch (the old `start − pitch`
+    // extension / ~½-pitch inset that left a full-depth land at the opening).
+    let tip = (pitch * 0.1).clamp(0.05, foot * 0.5);
+    let turns = (height / pitch).floor().max(2.0) - 1.0;
+    if !(turns >= 1.0 && turns.is_finite() && height > pitch * 2.0) {
+        return Err(KernelError::Invalid("too few turns for an internal thread".into()));
+    }
+    // Signed pitch: advance toward −axis (into the plate from the +Z entry).
+    let p = -pitch;
+    // At a0, the crest edge toward the entry (world +Z) is the upper crest of the profile in the
+    // local helix frame. With negative pitch, "upper" in the profile offsets still uses ±foot on
+    // the centreline intercept; place the entry-side crest tip at z_hi − tip:
+    //   z_entry_crest(a0) = (z0 + foot) + p·a0/τ = z_hi − tip
+    //   ⇒ z0 = z_hi − tip − foot − p·a0/τ
+    let z0 = z_hi - tip - foot - p * a0 / TAU;
+    let z_exit = z0 - foot + p * (a0 / TAU + turns);
+    if z_exit < z_lo + tip - 1e-9 {
+        // Fall back to the centred +pitch PoC window if the shifted helix would overrun the exit.
+        return Ok((z_lo + pitch * 0.5, pitch, turns));
+    }
+    Ok((z0, p, turns))
 }
 
 fn rev(e: &EdgeSpec) -> EdgeSpec {
@@ -235,10 +268,6 @@ pub fn plate_with_plain_and_internal_thread(
     if !(length > major * 3.0 && width > major * 3.0 && height > pitch * 3.0 && rc > 0.5 && rm > rc) {
         return Err(KernelError::Invalid("plate / thread size".into()));
     }
-    let turns = (height / pitch).floor().max(2.0) - 1.0;
-    if turns < 1.0 {
-        return Err(KernelError::Invalid("plate too thin for a turn".into()));
-    }
     let k = Vec3::Z;
     let u = Vec3::X;
     let origin_t = Vec3::new(thread_xy.0, thread_xy.1, 0.0);
@@ -249,15 +278,15 @@ pub fn plate_with_plain_and_internal_thread(
         return Err(KernelError::Invalid("thread profile too shallow".into()));
     }
     let (foot, crest) = ((pitch - pitch / 4.0) / 2.0, pitch / 16.0);
-    let z0 = pitch * 0.5;
     // Start at π/2 so the radial end-cap planes are x ≈ thread_xy.0 (not y = thread_xy.1),
     // leaving the plain hole clear for cylinder_face_at.
     let a0 = PI / 2.0;
+    let (z0, p_signed, turns) = internal_helix_placement(0.0, height, pitch, a0, foot)?;
     let end = a0 + TAU * turns;
-    let fl = helix_edge(origin_t, k, u, rc, z0 - foot, pitch, a0, end)?;
-    let fu = helix_edge(origin_t, k, u, rc, z0 + foot, pitch, a0, end)?;
-    let cl = helix_edge(origin_t, k, u, rm, z0 - crest, pitch, a0, end)?;
-    let cu = helix_edge(origin_t, k, u, rm, z0 + crest, pitch, a0, end)?;
+    let fl = helix_edge(origin_t, k, u, rc, z0 - foot, p_signed, a0, end)?;
+    let fu = helix_edge(origin_t, k, u, rc, z0 + foot, p_signed, a0, end)?;
+    let cl = helix_edge(origin_t, k, u, rm, z0 - crest, p_signed, a0, end)?;
+    let cu = helix_edge(origin_t, k, u, rm, z0 + crest, p_signed, a0, end)?;
     let (fl0, fl1) = ends(&fl)?;
     let (fu0, fu1) = ends(&fu)?;
     let (cl0, cl1) = ends(&cl)?;
@@ -265,7 +294,7 @@ pub fn plate_with_plain_and_internal_thread(
     let v = k.cross(u);
     let at_t = |r: f64, a: f64, z: f64| origin_t + k * z + (u * a.cos() + v * a.sin()) * r;
     let out_t = |a: f64| u * a.cos() + v * a.sin();
-    let mid = z0 + pitch / 2.0;
+    let mid = z0 + p_signed / 2.0;
     let flank = 0.5_f64;
     let (l, w, hz) = (length, width, height);
 
@@ -487,23 +516,19 @@ fn internal_thread_wall_open(
     if !(height > pitch * 2.0 && rm > rc && rc > 0.0) {
         return Err(KernelError::Invalid("thread height / diameter".into()));
     }
-    let turns = (height / pitch).floor().max(2.0) - 1.0;
-    if turns < 1.0 {
-        return Err(KernelError::Invalid("too few turns".into()));
-    }
     let h = basic_h(pitch);
     let basic = 5.0 * h / 8.0;
     if rm - rc < basic / 4.0 {
         return Err(KernelError::Invalid("thread profile too shallow".into()));
     }
     let (foot, crest) = ((pitch - pitch / 4.0) / 2.0, pitch / 16.0);
-    let z0 = z_lo + pitch * 0.5;
     let a0 = PI / 2.0;
+    let (z0, p_signed, turns) = internal_helix_placement(z_lo, z_hi, pitch, a0, foot)?;
     let end = a0 + TAU * turns;
-    let fl = helix_edge(origin, k, u, rc, z0 - foot, pitch, a0, end)?;
-    let fu = helix_edge(origin, k, u, rc, z0 + foot, pitch, a0, end)?;
-    let cl = helix_edge(origin, k, u, rm, z0 - crest, pitch, a0, end)?;
-    let cu = helix_edge(origin, k, u, rm, z0 + crest, pitch, a0, end)?;
+    let fl = helix_edge(origin, k, u, rc, z0 - foot, p_signed, a0, end)?;
+    let fu = helix_edge(origin, k, u, rc, z0 + foot, p_signed, a0, end)?;
+    let cl = helix_edge(origin, k, u, rm, z0 - crest, p_signed, a0, end)?;
+    let cu = helix_edge(origin, k, u, rm, z0 + crest, p_signed, a0, end)?;
     let (fl0, fl1) = ends(&fl)?;
     let (fu0, fu1) = ends(&fu)?;
     let (cl0, cl1) = ends(&cl)?;
@@ -511,7 +536,7 @@ fn internal_thread_wall_open(
     let v = k.cross(u);
     let at = |r: f64, a: f64, z: f64| origin + k * z + (u * a.cos() + v * a.sin()) * r;
     let out = |a: f64| u * a.cos() + v * a.sin();
-    let mid = z0 + pitch / 2.0;
+    let mid = z0 + p_signed / 2.0;
     let flank = 0.5_f64;
     // Absolute free-rim chains are typically CW about +k at both ends. Reverse the bottom only
     // (same as full-sew rev(circle)/circle). Stitch then flips the open wall as a whole so its
