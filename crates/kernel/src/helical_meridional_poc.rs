@@ -137,9 +137,8 @@ pub fn chain_sample_radii(origin: Vec3, k: Vec3, e: &EdgeSpec, n: usize) -> Resu
     Ok(out)
 }
 
-/// M5×0.8 one-flank PoC: meridional ruled flank + plane∩ shared with planar caps, closed by
-/// axis-ruled “pie” faces (crest↔axis, root↔axis).
-pub fn m5_one_flank_closed_shell() -> Result<Body> {
+/// Build the five FaceSpecs for the one-flank PoC (no sew). Used for static topology audit.
+pub fn m5_one_flank_face_specs() -> Result<Vec<FaceSpec>> {
     let origin = Vec3::ZERO;
     let k = Vec3::Z;
     let u = Vec3::X;
@@ -193,7 +192,13 @@ pub fn m5_one_flank_closed_shell() -> Result<Body> {
     let bot_loop = vec![bot_cr.clone(), line(cl0, o0), line(o0, fl0)];
     let top_loop = vec![top_cr.clone(), line(cl1, o1), line(o1, fl1)];
 
-    let faces = [
+    // Audit of b26e40ac found 4 same-direction shared edges, all incident on face 3
+    // (crest–axis pie): fl, radial@z_hi, axis, radial@z_lo. One correction: reverse
+    // that face's boundary loop so every shared edge is traversed oppositely.
+    let crest_pie_loop = vec![fl.clone(), line(fl1, o1), rev(&axis_fl), line(o0, fl0)];
+    let crest_pie_loop: Vec<EdgeSpec> = crest_pie_loop.into_iter().rev().map(|e| rev(&e)).collect();
+
+    Ok(vec![
         FaceSpec {
             loops: vec![vec![fl.clone(), top, rev(&cl), bot_rc]],
             surface: SurfSpec::Ruled { a: fl_gen, b: cl_gen },
@@ -210,7 +215,7 @@ pub fn m5_one_flank_closed_shell() -> Result<Body> {
             probe: None,
         },
         FaceSpec {
-            loops: vec![vec![fl.clone(), line(fl1, o1), rev(&axis_fl), line(o0, fl0)]],
+            loops: vec![crest_pie_loop],
             surface: SurfSpec::Ruled { a: fl, b: axis_fl.clone() },
             probe: Some((at(rc * 0.5, a_fl_lo + 0.1, mid_z), out(a_fl_lo))),
         },
@@ -219,9 +224,161 @@ pub fn m5_one_flank_closed_shell() -> Result<Body> {
             surface: SurfSpec::Ruled { a: cl, b: axis_cl.clone() },
             probe: Some((at(rm * 0.5, a_cl_lo + 0.1, mid_z), -out(a_cl_lo))),
         },
-    ];
+    ])
+}
 
-    crate::sew(&faces)
+/// M5×0.8 one-flank PoC: meridional ruled flank + plane∩ shared with planar caps, closed by
+/// axis-ruled “pie” faces (crest↔axis, root↔axis).
+pub fn m5_one_flank_closed_shell() -> Result<Body> {
+    crate::sew(&m5_one_flank_face_specs()?)
+}
+
+/// Static topology audit of FaceSpecs before sew (no truck call).
+pub struct TopologyAudit {
+    pub wire_closures_ok: bool,
+    pub free_edges: usize,
+    pub overused_edges: usize,
+    pub same_direction_shares: usize,
+    pub opposite_direction_shares: usize,
+    pub report: String,
+}
+
+fn edge_canon_key(e: &EdgeSpec) -> String {
+    let (a, b) = match e {
+        EdgeSpec::Line { a, b } | EdgeSpec::Arc { a, b, .. } => (*a, *b),
+        EdgeSpec::Chain { ctrl, .. } => (
+            ctrl.first().copied().unwrap_or(Vec3::ZERO),
+            ctrl.last().copied().unwrap_or(Vec3::ZERO),
+        ),
+    };
+    let q = |p: Vec3| format!("{:.6},{:.6},{:.6}", p.x, p.y, p.z);
+    let (ka, kb) = (q(a), q(b));
+    let ends = if ka <= kb { format!("{ka}|{kb}") } else { format!("{kb}|{ka}") };
+    let kind = match e {
+        EdgeSpec::Line { .. } => "Line",
+        EdgeSpec::Arc { .. } => "Arc",
+        EdgeSpec::Chain { degree, ctrl } => return format!("Chain{degree}|{ends}|n{}", ctrl.len()),
+    };
+    format!("{kind}|{ends}")
+}
+
+fn edge_forward_key(e: &EdgeSpec) -> String {
+    let (a, b) = match e {
+        EdgeSpec::Line { a, b } | EdgeSpec::Arc { a, b, .. } => (*a, *b),
+        EdgeSpec::Chain { ctrl, .. } => (
+            ctrl.first().copied().unwrap_or(Vec3::ZERO),
+            ctrl.last().copied().unwrap_or(Vec3::ZERO),
+        ),
+    };
+    format!("{:.6},{:.6},{:.6}->{:.6},{:.6},{:.6}", a.x, a.y, a.z, b.x, b.y, b.z)
+}
+
+pub fn audit_face_specs(faces: &[FaceSpec]) -> TopologyAudit {
+    let mut report = String::new();
+    let mut wire_ok = true;
+    for (fi, f) in faces.iter().enumerate() {
+        let surf = match &f.surface {
+            SurfSpec::Plane => "Plane",
+            SurfSpec::Ruled { .. } => "Ruled",
+            SurfSpec::Revolved { .. } => "Revolved",
+            SurfSpec::Extruded { .. } => "Extruded",
+        };
+        report.push_str(&format!("face {fi} ({surf}) loops={}\n", f.loops.len()));
+        for (li, lp) in f.loops.iter().enumerate() {
+            let mut closed = true;
+            for i in 0..lp.len() {
+                let (sa, sb) = match &lp[i] {
+                    EdgeSpec::Line { a, b } | EdgeSpec::Arc { a, b, .. } => (*a, *b),
+                    EdgeSpec::Chain { ctrl, .. } => (
+                        ctrl.first().copied().unwrap_or(Vec3::ZERO),
+                        ctrl.last().copied().unwrap_or(Vec3::ZERO),
+                    ),
+                };
+                let j = (i + 1) % lp.len();
+                let (na, _) = match &lp[j] {
+                    EdgeSpec::Line { a, b } | EdgeSpec::Arc { a, b, .. } => (*a, *b),
+                    EdgeSpec::Chain { ctrl, .. } => (
+                        ctrl.first().copied().unwrap_or(Vec3::ZERO),
+                        ctrl.last().copied().unwrap_or(Vec3::ZERO),
+                    ),
+                };
+                let gap = sb.dist(na);
+                report.push_str(&format!(
+                    "  L{li} E{i}: {} .. gap_to_next={:.3e}\n",
+                    edge_forward_key(&lp[i]),
+                    gap
+                ));
+                if gap > 1e-6 {
+                    closed = false;
+                    wire_ok = false;
+                }
+                let _ = sa;
+            }
+            report.push_str(&format!("  L{li} closed={closed} edges={}\n", lp.len()));
+        }
+    }
+
+    // Incidence by undirected geometric key.
+    let mut uses: std::collections::BTreeMap<String, Vec<(usize, String)>> = std::collections::BTreeMap::new();
+    for (fi, f) in faces.iter().enumerate() {
+        for lp in &f.loops {
+            for e in lp {
+                uses.entry(edge_canon_key(e)).or_default().push((fi, edge_forward_key(e)));
+            }
+        }
+    }
+
+    let mut free = 0usize;
+    let mut over = 0usize;
+    let mut same_dir = 0usize;
+    let mut opp_dir = 0usize;
+    report.push_str("\nedge incidence:\n");
+    for (key, u) in &uses {
+        let faces_u: Vec<usize> = u.iter().map(|(f, _)| *f).collect();
+        report.push_str(&format!("  [{key}] n={} faces={faces_u:?}\n", u.len()));
+        for (_, fwd) in u {
+            report.push_str(&format!("      dir {fwd}\n"));
+        }
+        match u.len() {
+            1 => free += 1,
+            2 => {
+                let d0 = &u[0].1;
+                let d1 = &u[1].1;
+                // Opposite if one is reverse of the other (swap arrow).
+                let rev0 = {
+                    let parts: Vec<_> = d0.split("->").collect();
+                    if parts.len() == 2 {
+                        format!("{}->{}", parts[1], parts[0])
+                    } else {
+                        String::new()
+                    }
+                };
+                if d1 == &rev0 {
+                    opp_dir += 1;
+                    report.push_str("      ORIENT opposite OK\n");
+                } else if d0 == d1 {
+                    same_dir += 1;
+                    report.push_str("      ORIENT SAME DIRECTION (defect)\n");
+                } else {
+                    same_dir += 1;
+                    report.push_str("      ORIENT mismatch (not exact reverse)\n");
+                }
+            }
+            n => {
+                over += 1;
+                report.push_str(&format!("      OVERUSED n={n}\n"));
+            }
+        }
+    }
+
+    TopologyAudit {
+        wire_closures_ok: wire_ok,
+        free_edges: free,
+        overused_edges: over,
+        same_direction_shares: same_dir,
+        opposite_direction_shares: opp_dir,
+        report,
+    }
 }
 
 /// Measurements for the entry plane∩flank curve alone (no sew).
@@ -275,6 +432,27 @@ mod tests {
         // Must not be the old straight-chord mid (~1.29).
         assert!(r.mid_radius > 2.0, "mid_r {} looks like constant-z chord", r.mid_radius);
         within(Duration::from_secs(60), t0);
+    }
+
+    /// Static topology audit only — no sew. Prints incidence/orientation report.
+    #[test]
+    fn one_flank_topology_audit() {
+        let t0 = Instant::now();
+        let faces = m5_one_flank_face_specs().expect("face specs");
+        assert_eq!(faces.len(), 5, "expected five-face shell");
+        let a = audit_face_specs(&faces);
+        eprintln!("=== TOPOLOGY AUDIT ===\n{}", a.report);
+        eprintln!(
+            "summary: wire_ok={} free={} overused={} same_dir={} opp_dir={}",
+            a.wire_closures_ok,
+            a.free_edges,
+            a.overused_edges,
+            a.same_direction_shares,
+            a.opposite_direction_shares
+        );
+        // Always succeed as a report harness; defects are in the report text.
+        within(Duration::from_secs(60), t0);
+        let _ = a;
     }
 
     #[test]
