@@ -333,7 +333,8 @@ pub fn plate_with_plain_and_internal_thread(
             surface: SurfSpec::Plane,
             probe: None,
         },
-        // Plain hole wall (analytic cylinder).
+        // Plain hole wall (analytic cylinder). Circles oppose the plate caps for sew; the inward
+        // probe flips face orientation (see sew::curved) so absolute boundaries stay seam-cuttable.
         FaceSpec {
             loops: vec![
                 circle(origin_p, k, u, rc, 0.0)?.into_iter().rev().map(|e| rev(&e)).collect(),
@@ -348,7 +349,7 @@ pub fn plate_with_plain_and_internal_thread(
             },
             probe: Some((origin_p + Vec3::new(-rc, 0.0, hz * 0.5), Vec3::new(-1.0, 0.0, 0.0))),
         },
-        // Threaded crest cylinder with helical window
+        // Threaded crest cylinder with helical window.
         FaceSpec {
             loops: vec![
                 circle(origin_t, k, u, rc, 0.0)?.into_iter().rev().map(|e| rev(&e)).collect(),

@@ -194,6 +194,54 @@ fn local_cylinder_replacement_yields_curved_closed_solid() {
     assert!(vol < 19850.0, "local replace volume {vol} suggests a filled bore");
 }
 
+
+#[test]
+fn internal_thread_display_plan_clears_the_bore() {
+    // Issue follow-up: truck's mesher chords helical crest cylinders across a through-hole.
+    // The display plan (#1289) must succeed for a Try4-sized plate and leave the bore open.
+    let stock = box_solid(Vec3::ZERO, Vec3::new(27.0, 24.5, 10.0)).unwrap();
+    let tap = tap_radius(5.0, 0.8);
+    let (cx, cy) = (20.76062192932085, 17.874947076172305);
+    let hole = cylinder(Vec3::new(cx, cy, -1.0), Vec3::Z, tap, 12.0).unwrap();
+    let plate = boolean(&stock, &hole, BoolOp::Cut).unwrap().unwrap();
+    let on = Vec3::new(cx, cy + tap, 5.0);
+    let threaded = try_replace_cylinder_with_helical_thread(&plate, on, 5.0, 0.8).expect("thread");
+    assert!(threaded.validity().is_empty(), "{:?}", threaded.validity());
+    assert!(crate::tess::seam::turns_more_than_once(&threaded.solid));
+    let (plan, _) = crate::tess::plan(&threaded.solid, 2e-3, None).expect("display plan for internal helical crest");
+    let mesh = plan.evaluate();
+    let dir = Vec3::new(0.0, 0.0, -1.0);
+    assert!(mesh.raycast(Vec3::new(cx, cy, 12.0), dir).is_none(), "axis must clear the display mesh");
+    let mut blocked = 0usize;
+    for i in 0..12 {
+        let a = std::f64::consts::TAU * i as f64 / 12.0;
+        let o = Vec3::new(cx + 0.3 * a.cos(), cy + 0.3 * a.sin(), 12.0);
+        if let Some((t, _)) = mesh.raycast(o, dir) {
+            let z = 12.0 - t;
+            if (0.0..=10.0).contains(&z) {
+                blocked += 1;
+            }
+        }
+    }
+    assert_eq!(blocked, 0, "ring r=0.3 must clear the display mesh, blocked {blocked}/12");
+    // reference_display_mesh / tessellate must take the same plan path (no chordal floor).
+    let tess = threaded.tessellate(2e-3).expect("tessellate");
+    assert!(tess.raycast(Vec3::new(cx, cy, 12.0), dir).is_none(), "tessellate mesh must also clear the bore");
+    let mut top_loops = 0usize;
+    let mut bot_loops = 0usize;
+    for i in 0..threaded.face_count() {
+        let Some(FaceSurface::Plane { point, normal }) = face_surface(&threaded, i) else { continue };
+        let n = normal.normalized().unwrap_or(Vec3::Z);
+        if (point.z - 10.0).abs() < 1e-3 && n.z.abs() > 0.9 {
+            top_loops = threaded.solid.face_iter().nth(i).map(|f| f.boundaries().len()).unwrap_or(0);
+        }
+        if point.z.abs() < 1e-3 && n.z.abs() > 0.9 {
+            bot_loops = threaded.solid.face_iter().nth(i).map(|f| f.boundaries().len()).unwrap_or(0);
+        }
+    }
+    assert!(top_loops >= 2 && bot_loops >= 2, "top={top_loops} bot={bot_loops}");
+}
+
 #[test]
 fn four_sequential_m5_threads_stay_curved_and_analytic() {
     let stock = box_solid(Vec3::ZERO, Vec3::new(40.0, 50.0, 10.0)).unwrap();

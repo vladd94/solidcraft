@@ -272,7 +272,34 @@ fn plan_face(
         [] => {}
         [d] => {
             let per = dom.period[*d].unwrap_or(std::f64::consts::TAU);
-            projected = seam::cut(s, &projected, *d, per, rules, h).ok_or_else(|| fail("boundary winds around the surface"))?;
+            // Internal hole walls (inward probe inverts the surface in place) keep sew-compatible
+            // absolute wires that wind against the absolute surface in (u, v). Retry: reverse the
+            // once-around loops (rim circles) first so a helical window keeps its hole sense, then
+            // reverse every loop (#1289 / modelled threads).
+            projected = match seam::cut(s, &projected, *d, per, rules, h) {
+                Some(cut) => cut,
+                None => {
+                    let mut rim_rev = projected.clone();
+                    for l in &mut rim_rev {
+                        if seam::drift(l, *d, per).abs() > per * 0.5 {
+                            l.uv.reverse();
+                            l.pts.reverse();
+                        }
+                    }
+                    match seam::cut(s, &rim_rev, *d, per, rules, h) {
+                        Some(cut) => cut,
+                        None => {
+                            let mut all_rev = projected.clone();
+                            for l in &mut all_rev {
+                                l.uv.reverse();
+                                l.pts.reverse();
+                            }
+                            seam::cut(s, &all_rev, *d, per, rules, h)
+                                .ok_or_else(|| fail("boundary winds around the surface"))?
+                        }
+                    }
+                }
+            };
         }
         _ => return Err(fail("boundary winds around the surface both ways")),
     }
