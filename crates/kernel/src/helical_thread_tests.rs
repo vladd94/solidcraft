@@ -169,7 +169,8 @@ fn internal_thread_begins_at_entry_not_one_pitch_early() {
     let on = Vec3::new(20.0, 20.0 + tap, 5.0);
     let threaded = try_replace_cylinder_with_helical_thread(&plate, on, 5.0, pitch).expect("thread");
     assert!(threaded.validity().is_empty(), "{:?}", threaded.validity());
-    // Sample B-spline flank vertices: the shallow start must sit at the entry (z≈0), not at −pitch.
+    // Sample B-spline flank vertices: the groove must begin at the +Z entry (z≈10), not one pitch
+    // outside (z≈10+pitch), and must not leave a full-pitch plain land before the first turn.
     let mut z_min = f64::INFINITY;
     let mut z_max = f64::NEG_INFINITY;
     let mut near_entry = 0usize;
@@ -194,18 +195,18 @@ fn internal_thread_begins_at_entry_not_one_pitch_early() {
                 }
                 z_min = z_min.min(p.z);
                 z_max = z_max.max(p.z);
-                if p.z >= -1e-3 && p.z <= pitch * 0.15 {
+                if p.z >= 10.0 - pitch * 0.15 && p.z <= 10.0 + 1e-3 {
                     near_entry += 1;
                 }
             }
         }
     }
     assert!(z_min.is_finite() && z_max.is_finite(), "sampled flank range");
-    assert!(z_min > -pitch * 0.25, "helix must not start near −pitch (z_min={z_min})");
-    assert!(z_min < pitch * 0.15, "first turn must begin at the entry (z_min={z_min})");
+    assert!(z_max < 10.0 + pitch * 0.25, "helix must not start above the entry (z_max={z_max})");
+    assert!(z_max > 10.0 - pitch * 0.15, "first turn must begin at the entry (z_max={z_max})");
     assert!(near_entry > 0, "partial first turn must have geometry at the entry plane");
-    // Exit may keep a short land (< one pitch); the old window left ~one pitch of plain bore.
-    assert!(z_max > 10.0 - pitch, "helix must not end a full pitch early (z_max={z_max})");
+    // Exit (bottom) may keep a short land (< one pitch).
+    assert!(z_min < pitch, "helix must reach into the hole (z_min={z_min})");
     let step = step_export(&[&threaded], "entry check").unwrap();
     let imported = step_import(&step).unwrap().bodies.remove(0).body;
     assert!(imported.validity().is_empty(), "STEP closed solid: {:?}", imported.validity());
