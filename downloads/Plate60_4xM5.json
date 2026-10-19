@@ -1,0 +1,225 @@
+{
+  "format": "solidcraft/28",
+  "format_pending": [
+    "hole-modeled-thread",
+    "joint-origin-edge",
+    "joint-origin-frame-x"
+  ],
+  "name": "Plate60_4xM5",
+  "units": "mm",
+  "params": [],
+  "features": [
+    {
+      "id": 1,
+      "name": "Box1",
+      "suppressed": false,
+      "body_names": [
+        "Plate"
+      ],
+      "param_names": [
+        "d1",
+        "d2",
+        "d3"
+      ],
+      "type": "box",
+      "corner": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "length": "60",
+      "width": "60",
+      "height": "10",
+      "operation": "new_body"
+    },
+    {
+      "id": 2,
+      "name": "Hole1",
+      "suppressed": false,
+      "param_names": [
+        "d4",
+        "d5",
+        "d6"
+      ],
+      "face_names": [
+        "F1:+z"
+      ],
+      "type": "hole",
+      "position": [
+        15.0,
+        15.0,
+        10.0
+      ],
+      "direction": [
+        -0.0,
+        -0.0,
+        -1.0
+      ],
+      "diameter": "4.2 mm",
+      "depth": "10",
+      "hole": {
+        "type": "drilled",
+        "tip_angle": "118"
+      },
+      "thread": "M5"
+    },
+    {
+      "id": 3,
+      "name": "Hole2",
+      "suppressed": false,
+      "param_names": [
+        "d7",
+        "d8",
+        "d9"
+      ],
+      "face_names": [
+        "F1:+z"
+      ],
+      "type": "hole",
+      "position": [
+        45.0,
+        15.0,
+        10.0
+      ],
+      "direction": [
+        -0.0,
+        -0.0,
+        -1.0
+      ],
+      "diameter": "4.2 mm",
+      "depth": "10",
+      "hole": {
+        "type": "drilled",
+        "tip_angle": "118"
+      },
+      "thread": "M5"
+    },
+    {
+      "id": 4,
+      "name": "Hole3",
+      "suppressed": false,
+      "param_names": [
+        "d10",
+        "d11",
+        "d12"
+      ],
+      "face_names": [
+        "F1:+z"
+      ],
+      "type": "hole",
+      "position": [
+        15.0,
+        45.0,
+        10.0
+      ],
+      "direction": [
+        -0.0,
+        -0.0,
+        -1.0
+      ],
+      "diameter": "4.2 mm",
+      "depth": "10",
+      "hole": {
+        "type": "drilled",
+        "tip_angle": "118"
+      },
+      "thread": "M5"
+    },
+    {
+      "id": 5,
+      "name": "Hole4",
+      "suppressed": false,
+      "param_names": [
+        "d13",
+        "d14",
+        "d15"
+      ],
+      "face_names": [
+        "F1:+z"
+      ],
+      "type": "hole",
+      "position": [
+        45.0,
+        45.0,
+        10.0
+      ],
+      "direction": [
+        -0.0,
+        -0.0,
+        -1.0
+      ],
+      "diameter": "4.2 mm",
+      "depth": "10",
+      "hole": {
+        "type": "drilled",
+        "tip_angle": "118"
+      },
+      "thread": "M5"
+    },
+    {
+      "id": 6,
+      "name": "Thread1",
+      "suppressed": false,
+      "face_names": [
+        "F2:bore:side:0"
+      ],
+      "type": "thread",
+      "face": [
+        15.0,
+        17.1,
+        5.0
+      ],
+      "designation": "M5",
+      "modeled": true
+    },
+    {
+      "id": 7,
+      "name": "Thread2",
+      "suppressed": false,
+      "face_names": [
+        "F3:bore:side:0"
+      ],
+      "type": "thread",
+      "face": [
+        45.0,
+        17.1,
+        5.0
+      ],
+      "designation": "M5",
+      "modeled": true
+    },
+    {
+      "id": 8,
+      "name": "Thread3",
+      "suppressed": false,
+      "face_names": [
+        "F4:bore:side:0"
+      ],
+      "type": "thread",
+      "face": [
+        15.0,
+        47.1,
+        5.0
+      ],
+      "designation": "M5",
+      "modeled": true
+    },
+    {
+      "id": 9,
+      "name": "Thread4",
+      "suppressed": false,
+      "face_names": [
+        "F5:bore:side:0"
+      ],
+      "type": "thread",
+      "face": [
+        45.0,
+        47.1,
+        5.0
+      ],
+      "designation": "M5",
+      "modeled": true
+    }
+  ],
+  "next_id": 10
+}

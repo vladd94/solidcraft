@@ -56,7 +56,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .at("SOLID", "CREATE")
         .icon("hole")
         .key("H")
-        .params("position: [x,y,z] on a face (numbers, or length expressions the hole follows) | sketch + points: [sketch point ids] (one hole each, perpendicular to the sketch, into the material on whichever side of the sketch plane it is) | sketch alone (every sketch point: standalone points and circle centres); flip?: bool (sketch points: drill to the other side); direction?: [x,y,z] (default: into the face, against its outward normal; one that leaves the face is mirrored into it; ignored with sketch points); diameter | thread (a tapped hole: the tap drill, major − pitch) | clearance: \"M6\" with fit?: close|normal|loose (ISO 273); depth? (default through all) | to?: [x,y,z] (To Object: drill to that face or point); type?: simple|drilled|counterbore|countersink; tip_angle?; cb_diameter?, cb_depth?; cs_diameter?, cs_angle?; thread?: \"M6\" (cosmetic)"),
+        .params("position: [x,y,z] on a face (numbers, or length expressions the hole follows) | sketch + points: [sketch point ids] (one hole each, perpendicular to the sketch, into the material on whichever side of the sketch plane it is) | sketch alone (every sketch point: standalone points and circle centres); flip?: bool (sketch points: drill to the other side); single?: bool (with one sketch point: a Single hole that follows the point, drilled into the face there); direction?: [x,y,z] (default: into the face, against its outward normal; one that leaves the face is mirrored into it; ignored with sketch points unless single); diameter | thread (a tapped hole: the conventional tap-drill diameter) | clearance: \"M6\" with fit?: close|normal|loose (ISO 273); depth? (default through all) | to?: [x,y,z] (To Object: drill to that face or point); type?: simple|drilled|counterbore|countersink; tip_angle?; cb_diameter?, cb_depth?; cs_diameter?, cs_angle?; thread?: \"M6\" (cosmetic annotation unless modeled?: true, which cuts the helical profile); modeled?: bool"),
     CommandSpec::new("solid.pipe", "Pipe", pipe)
         .at("SOLID", "CREATE")
         .icon("pipe")
@@ -547,10 +547,11 @@ fn add_feature_in(s: &mut Session, p: &Value, kind: FeatureKind, world: bool) ->
     }
     let st = s.model.state();
     let bodies: Vec<&str> = st.bodies.iter().map(|b| b.name.as_str()).collect();
-    // The bodies this feature made, apart from the ones it changed or that were there (#374).
-    let created: Vec<&str> = st.bodies.iter().filter(|b| b.feature == id).map(|b| b.name.as_str()).collect();
     // Bodies that were there before and now have other geometry, and bodies that are gone.
     let old: std::collections::HashMap<&str, &solidcraft_doc::kernel::Body> = before.bodies.iter().map(|b| (b.name.as_str(), &b.body)).collect();
+    // The bodies this feature made, apart from the ones it changed or that were there (#374),
+    // and the pieces a cut left of a body made earlier, which keep that body's feature.
+    let created: Vec<&str> = st.bodies.iter().filter(|b| b.feature == id || !old.contains_key(b.name.as_str())).map(|b| b.name.as_str()).collect();
     let now: std::collections::HashSet<&str> = st.bodies.iter().map(|b| b.name.as_str()).collect();
     let changed: Vec<&str> =
         st.bodies.iter().filter(|b| b.feature != id && old.get(b.name.as_str()).is_some_and(|o| !o.same(&b.body))).map(|b| b.name.as_str()).collect();
@@ -1684,7 +1685,13 @@ fn hole(s: &mut Session, p: &Value) -> Result<Value> {
             let first =
                 ids.first().and_then(|id| ss.sketch.points.iter().find(|q| &q.id == id)).map(|q| ss.plane.to_world(q.pos)).unwrap_or_default();
             let flip = p.get("flip").and_then(Value::as_bool).unwrap_or(false);
-            Some((solidcraft_doc::SketchPoints { sketch: SketchId(sketch), ids, flip }, first, -n))
+            // A Single hole at one sketch point (#2110): it follows the point, drilled into the
+            // face there rather than across the sketch.
+            let single = p.get("single").and_then(Value::as_bool).unwrap_or(false);
+            if single && (ids.len() != 1 || flip) {
+                return Err(bad(cmd, "a `single` hole takes one sketch point and no `flip`"));
+            }
+            Some((solidcraft_doc::SketchPoints { sketch: SketchId(sketch), ids, flip, single }, first, -n))
         }
         _ => None,
     };
@@ -1693,6 +1700,10 @@ fn hole(s: &mut Session, p: &Value) -> Result<Value> {
         && solidcraft_doc::parse_metric_thread(t).is_none()
     {
         return Err(bad(cmd, format!("unknown thread `{t}` (ISO metric, like M6 or M6x0.75)")));
+    }
+    let modeled = p.get("modeled").and_then(Value::as_bool).unwrap_or(false);
+    if modeled && thread.is_none() {
+        return Err(bad(cmd, "`modeled` needs a `thread` (an ISO metric size such as M5)"));
     }
     // A position given as length expressions (#1678), say `["leg_h*0.4", "width/2", "t"]`: kept,
     // so the hole follows the parameters; drilled where they evaluate now.
@@ -1726,7 +1737,7 @@ fn hole(s: &mut Session, p: &Value) -> Result<Value> {
         (None, None) => return Err(bad(cmd, "`position` must be [x, y, z], numbers or length expressions (or give `sketch` and `points`)")),
     };
     let direction = match (p.get("direction").and_then(vec3), &points) {
-        (None, Some((_, _, d))) => *d,
+        (None, Some((sp, _, d))) if !sp.single => *d,
         (d, _) => match d {
             Some(d) => d.normalized().ok_or_else(|| bad(cmd, "`direction` must be non-zero"))?,
             None => {
@@ -1737,7 +1748,7 @@ fn hole(s: &mut Session, p: &Value) -> Result<Value> {
             }
         },
     };
-    // The diameter: given, or the tap drill of the thread (major − pitch), or an ISO 273
+    // The diameter: given, or the conventional tap drill of the thread, or an ISO 273
     // clearance hole for a bolt size (close, normal or loose fit).
     let diameter = match (expr(p, "diameter"), &thread, str_(p, "clearance")) {
         (Some(d), _, _) => d,
@@ -1748,7 +1759,8 @@ fn hole(s: &mut Session, p: &Value) -> Result<Value> {
         }
         (None, Some(t), None) => {
             let (major, pitch) = solidcraft_doc::parse_metric_thread(t).ok_or_else(|| bad(cmd, "thread"))?;
-            Expr::new(format!("{} mm", ((major - pitch) * 1000.0).round() / 1000.0))
+            let drill = solidcraft_doc::tap_drill_diameter(major, pitch);
+            Expr::new(format!("{} mm", (drill * 1000.0).round() / 1000.0))
         }
         (None, None, None) => return Err(bad(cmd, "needs `diameter`, `thread` (a tapped hole) or `clearance` (a bolt size)")),
     };
@@ -1800,6 +1812,7 @@ fn hole(s: &mut Session, p: &Value) -> Result<Value> {
             hole: kind,
             points: points.map(|x| x.0),
             thread,
+            modeled,
             to: to.map(FacePick),
         },
     )
@@ -2156,6 +2169,10 @@ mod prism_local_tests;
 #[cfg(test)]
 #[path = "revolve_convention_tests.rs"]
 mod revolve_convention_tests;
+
+#[cfg(test)]
+#[path = "single_hole_tests.rs"]
+mod single_hole_tests;
 
 #[cfg(test)]
 #[path = "sweep_options_tests.rs"]
