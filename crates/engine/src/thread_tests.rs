@@ -317,7 +317,6 @@ fn try4_modeled_hole_must_be_through() {
     assert!(body.validity().is_empty(), "{:?}", body.validity());
     let (x, y) = (pos[0], pos[1]);
     let above = solidcraft_geom::Vec3::new(x, y, 11.0);
-    let mid = solidcraft_geom::Vec3::new(x, y, 5.0);
     let below = solidcraft_geom::Vec3::new(x, y, -1.0);
     let solid = solidcraft_geom::Vec3::new(2.0, 2.0, 5.0);
     let fine = body.tessellate(1e-3).expect("fine tess");
@@ -332,21 +331,12 @@ fn try4_modeled_hole_must_be_through() {
             .count()
     };
     let mid_air = bore_air(0.4, 5.0);
-    eprintln!(
-        "contains above={} mid={} below={} solid={} faces={} vol~{} mid_air={}/12 bounds={:?}",
-        body.contains(above),
-        body.contains(mid),
-        body.contains(below),
-        body.contains(solid),
-        body.face_count(),
-        vol,
-        mid_air,
-        fine.bounds(),
-    );
+    let exit_air = bore_air(0.4, 0.5);
     assert!(!body.contains(above), "air above");
     assert!(!body.contains(below), "through: air below exit");
     assert!(body.contains(solid), "plate material");
     assert!(mid_air >= 8, "bore must be empty at mid-depth ({mid_air}/12 air)");
+    assert!(exit_air >= 8, "bore must stay open near exit ({exit_air}/12 air)");
     // Filled-bore regression: volume rose above the solid plate (~6615) when the cavity inverted.
     assert!(vol < 6476.823072128656, "threaded volume {vol} must stay below plain through-hole");
 }
