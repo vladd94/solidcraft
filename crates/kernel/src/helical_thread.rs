@@ -56,6 +56,31 @@ fn helix_edge(origin: Vec3, axis: Vec3, u: Vec3, r: f64, z0: f64, pitch: f64, a0
     Ok(EdgeSpec::Chain { degree: 3, ctrl: ctrl.into() })
 }
 
+/// Centreline intercept `z0` (at angle 0) and turn count so the lower crest begins at the entry
+/// plane — not one pitch before it (`start − pitch`).
+///
+/// The first turn is a natural partial engagement with the entry plane: at Z = entry only the
+/// lower crest tip exists; the full ISO profile appears as the helix advances. End-caps stay at
+/// the groove ends (no cylindrical land with a sudden full-depth wall inset by ~½ pitch).
+fn internal_helix_placement(z_lo: f64, z_hi: f64, pitch: f64, a0: f64, foot: f64) -> Result<(f64, f64)> {
+    let height = z_hi - z_lo;
+    // Rim clearance for a meshable crest band — well below one pitch (the old `start − pitch`
+    // extension / ~½-pitch inset that left a full-depth land at the opening).
+    let tip = (pitch * 0.1).clamp(0.05, foot * 0.5);
+    // Place the lower crest tip at the entry: z_fl(a0) = (z0 − foot) + pitch·a0/τ = z_lo + tip.
+    let z0 = z_lo + tip + foot - pitch * a0 / TAU;
+    let turns = (height / pitch).floor().max(2.0) - 1.0;
+    if !(turns >= 1.0 && turns.is_finite() && height > pitch * 2.0) {
+        return Err(KernelError::Invalid("too few turns for an internal thread".into()));
+    }
+    let z_fu_end = z0 + foot + pitch * (a0 / TAU + turns);
+    if z_fu_end > z_hi - tip + 1e-9 {
+        // Fall back to the centred PoC window if the shifted helix would overrun the exit.
+        return Ok((z_lo + pitch * 0.5, turns));
+    }
+    Ok((z0, turns))
+}
+
 fn rev(e: &EdgeSpec) -> EdgeSpec {
     match e {
         EdgeSpec::Chain { degree, ctrl } => EdgeSpec::Chain { degree: *degree, ctrl: ctrl.iter().rev().copied().collect::<Arc<[Vec3]>>() },
@@ -235,10 +260,6 @@ pub fn plate_with_plain_and_internal_thread(
     if !(length > major * 3.0 && width > major * 3.0 && height > pitch * 3.0 && rc > 0.5 && rm > rc) {
         return Err(KernelError::Invalid("plate / thread size".into()));
     }
-    let turns = (height / pitch).floor().max(2.0) - 1.0;
-    if turns < 1.0 {
-        return Err(KernelError::Invalid("plate too thin for a turn".into()));
-    }
     let k = Vec3::Z;
     let u = Vec3::X;
     let origin_t = Vec3::new(thread_xy.0, thread_xy.1, 0.0);
@@ -249,10 +270,10 @@ pub fn plate_with_plain_and_internal_thread(
         return Err(KernelError::Invalid("thread profile too shallow".into()));
     }
     let (foot, crest) = ((pitch - pitch / 4.0) / 2.0, pitch / 16.0);
-    let z0 = pitch * 0.5;
     // Start at π/2 so the radial end-cap planes are x ≈ thread_xy.0 (not y = thread_xy.1),
     // leaving the plain hole clear for cylinder_face_at.
     let a0 = PI / 2.0;
+    let (z0, turns) = internal_helix_placement(0.0, height, pitch, a0, foot)?;
     let end = a0 + TAU * turns;
     let fl = helix_edge(origin_t, k, u, rc, z0 - foot, pitch, a0, end)?;
     let fu = helix_edge(origin_t, k, u, rc, z0 + foot, pitch, a0, end)?;
@@ -487,18 +508,14 @@ fn internal_thread_wall_open(
     if !(height > pitch * 2.0 && rm > rc && rc > 0.0) {
         return Err(KernelError::Invalid("thread height / diameter".into()));
     }
-    let turns = (height / pitch).floor().max(2.0) - 1.0;
-    if turns < 1.0 {
-        return Err(KernelError::Invalid("too few turns".into()));
-    }
     let h = basic_h(pitch);
     let basic = 5.0 * h / 8.0;
     if rm - rc < basic / 4.0 {
         return Err(KernelError::Invalid("thread profile too shallow".into()));
     }
     let (foot, crest) = ((pitch - pitch / 4.0) / 2.0, pitch / 16.0);
-    let z0 = z_lo + pitch * 0.5;
     let a0 = PI / 2.0;
+    let (z0, turns) = internal_helix_placement(z_lo, z_hi, pitch, a0, foot)?;
     let end = a0 + TAU * turns;
     let fl = helix_edge(origin, k, u, rc, z0 - foot, pitch, a0, end)?;
     let fu = helix_edge(origin, k, u, rc, z0 + foot, pitch, a0, end)?;
