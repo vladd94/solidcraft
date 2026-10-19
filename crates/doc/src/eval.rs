@@ -488,17 +488,49 @@ fn cosmetic_face(mesh: &mut solidcraft_geom::Mesh, internal: bool, axis_point: V
 }
 
 /// Cut a modelled thread's groove out of its body. `on_face` is a point on the cylindrical face.
+///
+/// Supported path: curved helical B-rep via local cylinder replacement (ruled B-spline flanks,
+/// analytic crest/root). Never silently facets the body. Unsupported cases (external shafts,
+/// partial-length threads, mismatched tap radius) return an explicit error. The legacy faceted
+/// boolean lives in [`cut_modeled_thread_faceted_legacy`] for comparison only.
 fn cut_modeled_thread(st: &mut ModelState, t: &ThreadInfo, on_face: Vec3) -> Result<()> {
     let i = st.bodies.iter().position(|b| b.name == t.body).ok_or_else(|| DocError::Invalid("threaded body".into()))?;
     let Some(mb) = st.bodies.get(i).cloned() else { return Err(DocError::Invalid("body".into())) };
     let cyl = kernel::cylinder_face_at(&mb.body, on_face).ok_or_else(|| DocError::Invalid("no cylindrical face there to thread".into()))?;
     let tol = t.pitch * 1e-3;
+    let open = ((t.start - cyl.start).abs() < tol, (t.end - cyl.end).abs() < tol);
+    if !t.internal {
+        return Err(DocError::Invalid(
+            "curved helical B-rep threading does not support external shafts yet; use a cosmetic thread".into(),
+        ));
+    }
+    if !open.0 || !open.1 {
+        return Err(DocError::Invalid(
+            "curved helical B-rep threading supports full-depth through-holes only for now; partial-length modelled threads are not supported yet".into(),
+        ));
+    }
+    // Validate profile depth using the same checks as the groove builder (without building a mesh).
+    let _ = thread_groove(t, cyl.radius, open)?;
+    let nb = kernel::try_replace_cylinder_with_helical_thread(&mb.body, on_face, t.major_diameter, t.pitch)
+        .map_err(|e| DocError::Invalid(format!("{e}")))?;
+    let lineage = mb.traced().lineage.and_then(|l| crate::lineage::Lineage::step(&nb, &[&l]));
+    let nb = Traced { body: nb, lineage };
+    if let Some(slot) = st.bodies.get_mut(i) {
+        *slot = ModelBody::traced_new(mb.name, nb, mb.feature);
+    }
+    Ok(())
+}
+
+/// Legacy faceted modelled-thread cut (kept for reference; production uses the curved path).
+#[allow(dead_code)]
+fn cut_modeled_thread_faceted_legacy(st: &mut ModelState, t: &ThreadInfo, on_face: Vec3) -> Result<()> {
+    let i = st.bodies.iter().position(|b| b.name == t.body).ok_or_else(|| DocError::Invalid("threaded body".into()))?;
+    let Some(mb) = st.bodies.get(i).cloned() else { return Err(DocError::Invalid("body".into())) };
+    let cyl = kernel::cylinder_face_at(&mb.body, on_face).ok_or_else(|| DocError::Invalid("no cylindrical face there to thread".into()))?;
+    let tol = t.pitch * 1e-3;
     let groove = thread_groove(t, cyl.radius, ((t.start - cyl.start).abs() < tol, (t.end - cyl.end).abs() < tol))?;
-    // The B-rep boolean can't take helical walls in reasonable time: the body is cut
-    // faceted (curved faces within a two-hundredth of the pitch).
     let nb = kernel::faceted_boolean(&mb.body, &groove, BoolOp::Cut, t.pitch * 0.005)?
         .ok_or_else(|| DocError::Invalid("the thread removed everything".into()))?;
-    // The groove's faces are its triangles, with no role to name them by.
     let groove = crate::lineage::Lineage::unnamed_faces(groove.triangles.len());
     let lineage = mb.traced().lineage.and_then(|l| crate::lineage::Lineage::step(&nb, &[&l, &groove]));
     let nb = Traced { body: nb, lineage };

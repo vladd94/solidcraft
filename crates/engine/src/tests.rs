@@ -1718,8 +1718,10 @@ fn tapped_hole_models_when_asked_and_stays_cosmetic_otherwise() {
     assert!(farthest > wall - 0.15, "{farthest} vs {wall}");
 
     let mut modeled = plate(true);
-    let modeled_v = volume(&mut modeled);
-    assert!(modeled_v < plain_v - 1.0, "{modeled_v} vs {plain_v}");
+    let modeled_body = modeled.model.state().bodies.first().map(|b| b.body.clone()).expect("body");
+    let faces = modeled_body.face_count();
+    assert!(faces < 80, "modeled tapped hole stays curved B-rep ({faces} faces), not ~4000 facets");
+    assert!(faces > 8, "modeled thread adds helical faces: {faces}");
     assert!(modeled.model.state().threads.is_empty());
     let err = modeled.execute("solid.hole", &json!({"position": [2.0, 2.0, 8.0], "diameter": 3.0, "modeled": true})).unwrap_err();
     assert!(err.to_string().contains("thread"), "{err}");

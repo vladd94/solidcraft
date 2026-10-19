@@ -396,34 +396,237 @@ pub fn plate_with_plain_and_internal_thread(
     sew(&faces)
 }
 
-/// Try to replace one internal cylinder on an existing body with a helical wall by
-/// `remove_faces` + `stitch` of a threaded tube. Never falls back to a faceted boolean.
+/// Free edges of a surface body (used once).
+fn free_truck_edges(body: &Body) -> Vec<truck_modeling::Edge> {
+    use truck_modeling as mt;
+    let mut uses: std::collections::HashMap<mt::EdgeID, (usize, mt::Edge)> = std::collections::HashMap::new();
+    for f in body.solid.face_iter() {
+        for e in f.boundaries().iter().flat_map(|w| w.edge_iter()) {
+            uses.entry(e.id()).or_insert((0, e.clone())).0 += 1;
+        }
+    }
+    uses.into_values().filter(|(n, _)| *n == 1).map(|(_, e)| e).collect()
+}
+
+/// Rim loop of a cylindrical hole at axial parameter `z` (along `axis` from `origin`), taken from
+/// the body's free edges so stitch can rematch the plate after `remove_faces`.
+fn free_rim_loop(body: &Body, origin: Vec3, axis: Vec3, r: f64, z: f64, tol: f64) -> Result<Vec<EdgeSpec>> {
+    use truck_modeling::{BoundedCurve, ParametricCurve};
+    let k = axis.normalized().ok_or_else(|| KernelError::Invalid("rim axis".into()))?;
+    let on_rim = |p: Vec3| {
+        let along = (p - origin).dot(k);
+        let radial = ((p - origin) - k * along).len();
+        (along - z).abs() <= tol && (radial - r).abs() <= tol
+    };
+    let mut arcs: Vec<(Vec3, Vec3, Vec3)> = Vec::new();
+    for e in free_truck_edges(body) {
+        let c = e.curve();
+        let (t0, t1) = c.range_tuple();
+        if !(t0.is_finite() && t1.is_finite()) {
+            continue;
+        }
+        let (a, b, mid) = (crate::body::from_p3(c.subs(t0)), crate::body::from_p3(c.subs(t1)), crate::body::from_p3(c.subs(0.5 * (t0 + t1))));
+        if on_rim(a) && on_rim(b) && on_rim(mid) {
+            arcs.push((a, b, mid));
+        }
+    }
+    if arcs.is_empty() {
+        return Err(KernelError::Failed("no free rim edges at the cylinder end".into()));
+    }
+    // Order into a single closed loop.
+    let mut ordered: Vec<EdgeSpec> = Vec::with_capacity(arcs.len());
+    let (a0, b0, m0) = arcs.swap_remove(0);
+    ordered.push(EdgeSpec::Arc { a: a0, b: b0, mid: m0 });
+    let mut cur = b0;
+    while !arcs.is_empty() {
+        let mut found = None;
+        for (i, (a, b, mid)) in arcs.iter().enumerate() {
+            if a.dist(cur) <= tol {
+                found = Some((i, EdgeSpec::Arc { a: *a, b: *b, mid: *mid }, *b));
+                break;
+            }
+            if b.dist(cur) <= tol {
+                found = Some((i, EdgeSpec::Arc { a: *b, b: *a, mid: *mid }, *a));
+                break;
+            }
+        }
+        let Some((i, edge, next)) = found else {
+            return Err(KernelError::Failed("rim edges do not form a closed loop".into()));
+        };
+        arcs.swap_remove(i);
+        ordered.push(edge);
+        cur = next;
+    }
+    if cur.dist(a0) > tol {
+        return Err(KernelError::Failed("rim loop does not close".into()));
+    }
+    Ok(ordered)
+}
+
+/// Open helical wall for an internal through-hole: crest/root cylinders + ruled B-spline flanks.
+/// Outer free boundaries are the supplied top/bottom rim loops (from the plate after cylinder removal).
+/// `crest` is the hole wall radius (tap drill / minor); root is the major radius.
+fn internal_thread_wall_open(
+    origin: Vec3,
+    axis: Vec3,
+    u: Vec3,
+    major: f64,
+    pitch: f64,
+    crest: f64,
+    z_lo: f64,
+    z_hi: f64,
+    bot: Vec<EdgeSpec>,
+    top: Vec<EdgeSpec>,
+) -> Result<Body> {
+    let k = axis.normalized().ok_or_else(|| KernelError::Invalid("thread axis".into()))?;
+    let u = u.normalized().ok_or_else(|| KernelError::Invalid("thread radial".into()))?;
+    let rc = crest;
+    let rm = major / 2.0;
+    let height = z_hi - z_lo;
+    if !(height > pitch * 2.0 && rm > rc && rc > 0.0) {
+        return Err(KernelError::Invalid("thread height / diameter".into()));
+    }
+    let turns = (height / pitch).floor().max(2.0) - 1.0;
+    if turns < 1.0 {
+        return Err(KernelError::Invalid("too few turns".into()));
+    }
+    let h = basic_h(pitch);
+    let basic = 5.0 * h / 8.0;
+    if rm - rc < basic / 4.0 {
+        return Err(KernelError::Invalid("thread profile too shallow".into()));
+    }
+    let (foot, crest) = ((pitch - pitch / 4.0) / 2.0, pitch / 16.0);
+    let z0 = z_lo + pitch * 0.5;
+    let a0 = PI / 2.0;
+    let end = a0 + TAU * turns;
+    let fl = helix_edge(origin, k, u, rc, z0 - foot, pitch, a0, end)?;
+    let fu = helix_edge(origin, k, u, rc, z0 + foot, pitch, a0, end)?;
+    let cl = helix_edge(origin, k, u, rm, z0 - crest, pitch, a0, end)?;
+    let cu = helix_edge(origin, k, u, rm, z0 + crest, pitch, a0, end)?;
+    let (fl0, fl1) = ends(&fl)?;
+    let (fu0, fu1) = ends(&fu)?;
+    let (cl0, cl1) = ends(&cl)?;
+    let (cu0, cu1) = ends(&cu)?;
+    let v = k.cross(u);
+    let at = |r: f64, a: f64, z: f64| origin + k * z + (u * a.cos() + v * a.sin()) * r;
+    let out = |a: f64| u * a.cos() + v * a.sin();
+    let mid = z0 + pitch / 2.0;
+    let flank = 0.5_f64;
+    let bot_rev: Vec<EdgeSpec> = bot.iter().rev().map(rev).collect();
+    crate::sew_open(&[
+        FaceSpec {
+            loops: vec![bot_rev, top, vec![line(fl0, fu0), fu.clone(), line(fu1, fl1), rev(&fl)]],
+            surface: SurfSpec::Revolved {
+                a: origin + u * rc + k * (z_lo - 1.0),
+                b: origin + u * rc + k * (z_hi + 1.0),
+                axis_origin: origin,
+                axis: k,
+                angle: TAU,
+            },
+            probe: Some((at(rc, 0.0, z_lo + (z0 - z_lo) * 0.25), -out(0.0))),
+        },
+        FaceSpec {
+            loops: vec![vec![fl.clone(), line(fl1, cl1), rev(&cl), line(cl0, fl0)]],
+            surface: SurfSpec::Ruled { a: fl.clone(), b: cl.clone() },
+            probe: Some((at((rc + rm) / 2.0, PI, mid - (foot + crest) / 2.0), out(PI) * flank)),
+        },
+        FaceSpec {
+            loops: vec![vec![cu.clone(), line(cu1, fu1), rev(&fu), line(fu0, cu0)]],
+            surface: SurfSpec::Ruled { a: fu.clone(), b: cu.clone() },
+            probe: Some((at((rc + rm) / 2.0, PI, mid + (foot + crest) / 2.0), out(PI) * flank)),
+        },
+        FaceSpec {
+            loops: vec![vec![cl.clone(), line(cl1, cu1), rev(&cu), line(cu0, cl0)]],
+            surface: SurfSpec::Revolved {
+                a: origin + u * rm + k * (z_lo - 1.0),
+                b: origin + u * rm + k * (z_hi + 1.0),
+                axis_origin: origin,
+                axis: k,
+                angle: TAU,
+            },
+            probe: Some((at(rm, PI, mid), out(PI))),
+        },
+        FaceSpec { loops: vec![vec![line(fl0, cl0), line(cl0, cu0), line(cu0, fu0), line(fu0, fl0)]], surface: SurfSpec::Plane, probe: None },
+        FaceSpec { loops: vec![vec![line(fl1, fu1), line(fu1, cu1), line(cu1, cl1), line(cl1, fl1)]], surface: SurfSpec::Plane, probe: None },
+    ])
+}
+
+/// Replace one internal through-hole cylinder with a curved helical thread wall by
+/// `remove_faces` + `sew_open` + `stitch`. Never falls back to a faceted boolean.
 ///
-/// **PoC blocker:** stitching an open shell (plate minus cylinder) to a closed threaded tube
-/// does not yield a single closed solid — the tube brings its own outer wall. A true local
-/// face swap needs an open helical-wall shell that shares the bore's rim circles; that path
-/// is Stage 3. This function records the failure explicitly.
+/// Supported today: internal cylindrical through-holes whose radius matches the conventional
+/// tap drill for `(major, pitch)`. Partial-length threads and external shafts return an
+/// explicit error so callers do not silently facet.
 pub fn try_replace_cylinder_with_helical_thread(body: &Body, on_face: Vec3, major: f64, pitch: f64) -> Result<Body> {
     let cyl = crate::cylinder_face_at(body, on_face).ok_or_else(|| KernelError::Invalid("no cylindrical face there to thread".into()))?;
     if !cyl.internal {
-        return Err(KernelError::Invalid("internal helical thread needs a hole".into()));
+        return Err(KernelError::Invalid(
+            "curved helical B-rep threading supports internal through-holes only for now; external shafts are not supported yet".into(),
+        ));
     }
-    let want = tap_radius(major, pitch);
-    if (cyl.radius - want).abs() > 0.05 * major {
-        return Err(KernelError::Invalid(format!("hole radius {:.3} mm is not tap radius {:.3} mm", cyl.radius, want)));
-    }
-    let face = crate::surfaces::nearest_face(body, on_face)?;
-    let open = crate::remove_faces(body, &[face])?;
     let height = (cyl.end - cyl.start).abs();
-    let turns = (height / pitch).floor().max(2.0) - 1.0;
-    let tube = internal_thread_tube(Vec3::ZERO, Vec3::Z, major, pitch, turns, major.max(8.0))?;
-    match crate::stitch(&[&open, &tube], pitch * 1e-4) {
-        Ok(b) if b.validity().is_empty() && b.shell_count() == 1 => Ok(b),
-        Ok(_) => Err(KernelError::Failed(
-            "local helical sew into an existing plate is not closed yet (stitch returned a non-solid or multi-shell body); use plate_with_plain_and_internal_thread for the curved B-rep proof".into(),
-        )),
-        Err(e) => Err(KernelError::Failed(format!(
-            "local helical sew into an existing plate is not closed yet ({e}); use plate_with_plain_and_internal_thread for the curved B-rep proof"
-        ))),
+    if height / pitch > 190.0 {
+        return Err(KernelError::Invalid(format!("a modelled thread is limited to 190 turns ({:.0} mm at this pitch)", 190.0 * pitch)));
     }
+    let h = basic_h(pitch);
+    let basic = 5.0 * h / 8.0;
+    if major / 2.0 - cyl.radius < basic / 4.0 {
+        return Err(KernelError::Invalid(format!(
+            "hole radius {:.3} mm is too wide for a modelled M{major}×{pitch} thread (need at least {:.3} mm of profile depth)",
+            cyl.radius,
+            basic / 4.0
+        )));
+    }
+    // A boolean-cut hole is often two half-cylinders; remove every face of this bore.
+    let k = cyl.axis;
+    let origin = cyl.axis_point;
+    let (z_lo, z_hi) = if cyl.start <= cyl.end { (cyl.start, cyl.end) } else { (cyl.end, cyl.start) };
+    let face_tol = (pitch * 1e-2).max(1e-3);
+    let mut bore_faces: Vec<usize> = Vec::new();
+    for i in 0..body.face_count() {
+        let Some(crate::FaceSurface::Cylinder { origin: o, axis, radius }) = crate::face_surface(body, i) else {
+            continue;
+        };
+        let Some(axis) = axis.normalized() else { continue };
+        if (radius - cyl.radius).abs() > face_tol {
+            continue;
+        }
+        if axis.cross(k).len() > 1e-6 {
+            continue;
+        }
+        let radial = (o - origin) - k * (o - origin).dot(k);
+        if radial.len() > face_tol {
+            continue;
+        }
+        bore_faces.push(i);
+    }
+    if bore_faces.is_empty() {
+        let face = crate::surfaces::nearest_face(body, on_face)?;
+        bore_faces.push(face);
+    }
+    let open = crate::remove_faces(body, &bore_faces)?;
+    let tol = (pitch * 1e-3).max(1e-4);
+    let bot = free_rim_loop(&open, origin, k, cyl.radius, z_lo, tol * 10.0)?;
+    let top = free_rim_loop(&open, origin, k, cyl.radius, z_hi, tol * 10.0)?;
+    let u = k.any_perp();
+    let wall = internal_thread_wall_open(origin, k, u, major, pitch, cyl.radius, z_lo, z_hi, bot, top)?;
+    match crate::stitch(&[&open, &wall], pitch * 1e-4) {
+        Ok(b) if b.validity().is_empty() && b.shell_count() == 1 && !b.is_surface() => Ok(b),
+        Ok(b) => Err(KernelError::Failed(format!(
+            "helical thread stitch did not yield a single closed solid (shells={}, surface={}, validity={:?})",
+            b.shell_count(),
+            b.is_surface(),
+            b.validity()
+        ))),
+        Err(e) => Err(KernelError::Failed(format!("helical thread stitch failed: {e}"))),
+    }
+}
+
+/// External curved helical thread on a shaft cylinder. Not supported yet — returns an explicit
+/// error (legacy faceted path must not be used silently).
+pub fn try_replace_external_cylinder_with_helical_thread(body: &Body, on_face: Vec3, major: f64, pitch: f64) -> Result<Body> {
+    let _ = (body, on_face, major, pitch);
+    Err(KernelError::Invalid(
+        "curved helical B-rep threading does not support external shafts yet; use a cosmetic thread or wait for external sew support".into(),
+    ))
 }
