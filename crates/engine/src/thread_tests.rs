@@ -289,3 +289,64 @@ fn subsequent_op_beside_a_modelled_thread_finishes() {
     }
     assert!(unknown >= 2, "B-spline flanks survive STEP: {unknown}");
 }
+
+#[test]
+fn try4_modeled_hole_must_be_through() {
+    use serde_json::json;
+    let mut s = Session::default();
+    // 27 x 24.5 x 10 plate like Try4
+    run(&mut s, "sketch.create", json!({"plane": "XY"}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0,0], "p1": [27, 24.5]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"distance": 10}));
+    let pos = [20.76062192932085, 17.874947076172305, 10.0];
+    run(
+        &mut s,
+        "solid.hole",
+        json!({
+            "position": pos,
+            "diameter": 4.2,
+            "depth": 10,
+            "type": "drilled",
+            "tip_angle": 118,
+            "thread": "M5",
+            "modeled": true
+        }),
+    );
+    let body = s.model.state().bodies.first().expect("body").body.clone();
+    assert!(body.validity().is_empty(), "{:?}", body.validity());
+    let (x, y) = (pos[0], pos[1]);
+    let above = solidcraft_geom::Vec3::new(x, y, 11.0);
+    let mid = solidcraft_geom::Vec3::new(x, y, 5.0);
+    let below = solidcraft_geom::Vec3::new(x, y, -1.0);
+    let solid = solidcraft_geom::Vec3::new(2.0, 2.0, 5.0);
+    let fine = body.tessellate(1e-3).expect("fine tess");
+    let vol = fine.measure().volume;
+    // Ring samples avoid axis ray-cast noise through helical facets.
+    let bore_air = |r: f64, z: f64| -> usize {
+        (0..12)
+            .filter(|&i| {
+                let a = std::f64::consts::TAU * i as f64 / 12.0;
+                !fine.contains(solidcraft_geom::Vec3::new(x + r * a.cos(), y + r * a.sin(), z))
+            })
+            .count()
+    };
+    let mid_air = bore_air(0.4, 5.0);
+    eprintln!(
+        "contains above={} mid={} below={} solid={} faces={} vol~{} mid_air={}/12 bounds={:?}",
+        body.contains(above),
+        body.contains(mid),
+        body.contains(below),
+        body.contains(solid),
+        body.face_count(),
+        vol,
+        mid_air,
+        fine.bounds(),
+    );
+    assert!(!body.contains(above), "air above");
+    assert!(!body.contains(below), "through: air below exit");
+    assert!(body.contains(solid), "plate material");
+    assert!(mid_air >= 8, "bore must be empty at mid-depth ({mid_air}/12 air)");
+    // Filled-bore regression: volume rose above the solid plate (~6615) when the cavity inverted.
+    assert!(vol < 6476.823072128656, "threaded volume {vol} must stay below plain through-hole");
+}

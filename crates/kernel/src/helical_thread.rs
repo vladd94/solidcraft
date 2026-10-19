@@ -512,13 +512,16 @@ fn internal_thread_wall_open(
     let out = |a: f64| u * a.cos() + v * a.sin();
     let mid = z0 + pitch / 2.0;
     let flank = 0.5_f64;
+    // Absolute free-rim chains are typically CW about +k at both ends. Reverse the bottom only
+    // (same as full-sew rev(circle)/circle). Stitch then flips the open wall as a whole so its
+    // sew_open normals agree with the plate — leaving an empty through-bore.
     let bot_rev: Vec<EdgeSpec> = bot.iter().rev().map(rev).collect();
     crate::sew_open(&[
         FaceSpec {
             loops: vec![bot_rev, top, vec![line(fl0, fu0), fu.clone(), line(fu1, fl1), rev(&fl)]],
             surface: SurfSpec::Revolved {
-                a: origin + u * rc + k * (z_lo - 1.0),
-                b: origin + u * rc + k * (z_hi + 1.0),
+                a: origin + u * rc + k * z_lo,
+                b: origin + u * rc + k * z_hi,
                 axis_origin: origin,
                 axis: k,
                 angle: TAU,
@@ -538,8 +541,8 @@ fn internal_thread_wall_open(
         FaceSpec {
             loops: vec![vec![cl.clone(), line(cl1, cu1), rev(&cu), line(cu0, cl0)]],
             surface: SurfSpec::Revolved {
-                a: origin + u * rm + k * (z_lo - 1.0),
-                b: origin + u * rm + k * (z_hi + 1.0),
+                a: origin + u * rm + k * z_lo,
+                b: origin + u * rm + k * z_hi,
                 axis_origin: origin,
                 axis: k,
                 angle: TAU,
@@ -578,9 +581,19 @@ pub fn try_replace_cylinder_with_helical_thread(body: &Body, on_face: Vec3, majo
         )));
     }
     // A boolean-cut hole is often two half-cylinders; remove every face of this bore.
-    let k = cyl.axis;
+    // Build the helical wall in an axis frame where `k` points along increasing world Z when
+    // possible. `cylinder_face_at` often returns `k = -Z` for an internal bore; sewing the open
+    // wall in that frame leaves a consistently oriented but inverted cavity after stitch
+    // (mid-bore solid, volume above the plate).
+    let mut k = cyl.axis;
     let origin = cyl.axis_point;
-    let (z_lo, z_hi) = if cyl.start <= cyl.end { (cyl.start, cyl.end) } else { (cyl.end, cyl.start) };
+    let (mut z_lo, mut z_hi) = if cyl.start <= cyl.end { (cyl.start, cyl.end) } else { (cyl.end, cyl.start) };
+    if k.dot(Vec3::Z) < 0.0 {
+        k = -k;
+        let (a, b) = (-z_hi, -z_lo);
+        z_lo = a;
+        z_hi = b;
+    }
     let face_tol = (pitch * 1e-2).max(1e-3);
     let mut bore_faces: Vec<usize> = Vec::new();
     for i in 0..body.face_count() {

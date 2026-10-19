@@ -184,6 +184,14 @@ fn local_cylinder_replacement_yields_curved_closed_solid() {
         (0..threaded.face_count()).any(|i| matches!(face_surface(&threaded, i), Some(FaceSurface::Cylinder { origin, radius, .. }) if (origin.x - 12.0).abs() < 1e-2 && (radius - tap).abs() < 1e-3)),
         "plain hole analytic after replace"
     );
+    let mid = Vec3::new(28.0, 25.0, 5.0);
+    let plain_mid = Vec3::new(12.0, 25.0, 5.0);
+    let vol = threaded.tessellate(5e-3).unwrap().measure().volume;
+    eprintln!("local replace contains mid={} plain_mid={} vol~{}", threaded.contains(mid), threaded.contains(plain_mid), vol);
+    assert!(!threaded.contains(mid), "local replace bore must be empty");
+    assert!(!threaded.contains(plain_mid), "plain hole stays empty");
+    // Two tap holes in a 40×50×10 plate ≈ 19723; a filled bore sits near/above the solid box (20000).
+    assert!(vol < 19850.0, "local replace volume {vol} suggests a filled bore");
 }
 
 #[test]
