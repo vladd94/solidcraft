@@ -240,6 +240,24 @@ fn internal_thread_display_plan_clears_the_bore() {
         }
     }
     assert!(top_loops >= 2 && bot_loops >= 2, "top={top_loops} bot={bot_loops}");
+    let mut spanning = 0usize;
+    for t in &tess.triangles {
+        let Some([a, b, c]) = tess.tri(t) else { continue };
+        let n = (b - a).cross(c - a);
+        let area = n.len();
+        if area < 1e-12 {
+            continue;
+        }
+        if (n.z / area).abs() < 0.85 {
+            continue;
+        }
+        let centroid = (a + b + c) / 3.0;
+        let r = ((centroid.x - cx).powi(2) + (centroid.y - cy).powi(2)).sqrt();
+        if r < tap - 0.35 {
+            spanning += 1;
+        }
+    }
+    assert_eq!(spanning, 0, "display mesh must not chord across the bore ({spanning} tris)");
 }
 
 #[test]
