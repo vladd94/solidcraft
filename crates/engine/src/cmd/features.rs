@@ -56,7 +56,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         .at("SOLID", "CREATE")
         .icon("hole")
         .key("H")
-        .params("position: [x,y,z] on a face (numbers, or length expressions the hole follows) | sketch + points: [sketch point ids] (one hole each, perpendicular to the sketch, into the material on whichever side of the sketch plane it is) | sketch alone (every sketch point: standalone points and circle centres); flip?: bool (sketch points: drill to the other side); single?: bool (with one sketch point: a Single hole that follows the point, drilled into the face there); direction?: [x,y,z] (default: into the face, against its outward normal; one that leaves the face is mirrored into it; ignored with sketch points unless single); diameter | thread (a tapped hole: the tap drill, major − pitch) | clearance: \"M6\" with fit?: close|normal|loose (ISO 273); depth? (default through all) | to?: [x,y,z] (To Object: drill to that face or point); type?: simple|drilled|counterbore|countersink; tip_angle?; cb_diameter?, cb_depth?; cs_diameter?, cs_angle?; thread?: \"M6\" (cosmetic)"),
+        .params("position: [x,y,z] on a face (numbers, or length expressions the hole follows) | sketch + points: [sketch point ids] (one hole each, perpendicular to the sketch, into the material on whichever side of the sketch plane it is) | sketch alone (every sketch point: standalone points and circle centres); flip?: bool (sketch points: drill to the other side); single?: bool (with one sketch point: a Single hole that follows the point, drilled into the face there); direction?: [x,y,z] (default: into the face, against its outward normal; one that leaves the face is mirrored into it; ignored with sketch points unless single); diameter | thread (a tapped hole: the conventional tap-drill diameter) | clearance: \"M6\" with fit?: close|normal|loose (ISO 273); depth? (default through all) | to?: [x,y,z] (To Object: drill to that face or point); type?: simple|drilled|counterbore|countersink; tip_angle?; cb_diameter?, cb_depth?; cs_diameter?, cs_angle?; thread?: \"M6\" (cosmetic annotation unless modeled?: true, which cuts the helical profile); modeled?: bool"),
     CommandSpec::new("solid.pipe", "Pipe", pipe)
         .at("SOLID", "CREATE")
         .icon("pipe")
@@ -1701,6 +1701,10 @@ fn hole(s: &mut Session, p: &Value) -> Result<Value> {
     {
         return Err(bad(cmd, format!("unknown thread `{t}` (ISO metric, like M6 or M6x0.75)")));
     }
+    let modeled = p.get("modeled").and_then(Value::as_bool).unwrap_or(false);
+    if modeled && thread.is_none() {
+        return Err(bad(cmd, "`modeled` needs a `thread` (an ISO metric size such as M5)"));
+    }
     // A position given as length expressions (#1678), say `["leg_h*0.4", "width/2", "t"]`: kept,
     // so the hole follows the parameters; drilled where they evaluate now.
     let at: Option<solidcraft_doc::PointExpr> = match p.get("position").and_then(Value::as_array) {
@@ -1744,7 +1748,7 @@ fn hole(s: &mut Session, p: &Value) -> Result<Value> {
             }
         },
     };
-    // The diameter: given, or the tap drill of the thread (major − pitch), or an ISO 273
+    // The diameter: given, or the conventional tap drill of the thread, or an ISO 273
     // clearance hole for a bolt size (close, normal or loose fit).
     let diameter = match (expr(p, "diameter"), &thread, str_(p, "clearance")) {
         (Some(d), _, _) => d,
@@ -1755,7 +1759,8 @@ fn hole(s: &mut Session, p: &Value) -> Result<Value> {
         }
         (None, Some(t), None) => {
             let (major, pitch) = solidcraft_doc::parse_metric_thread(t).ok_or_else(|| bad(cmd, "thread"))?;
-            Expr::new(format!("{} mm", ((major - pitch) * 1000.0).round() / 1000.0))
+            let drill = solidcraft_doc::tap_drill_diameter(major, pitch);
+            Expr::new(format!("{} mm", (drill * 1000.0).round() / 1000.0))
         }
         (None, None, None) => return Err(bad(cmd, "needs `diameter`, `thread` (a tapped hole) or `clearance` (a bolt size)")),
     };
@@ -1807,6 +1812,7 @@ fn hole(s: &mut Session, p: &Value) -> Result<Value> {
             hole: kind,
             points: points.map(|x| x.0),
             thread,
+            modeled,
             to: to.map(FacePick),
         },
     )

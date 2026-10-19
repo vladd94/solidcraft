@@ -50,6 +50,9 @@ mod freeform;
 pub mod fuzz;
 mod heal;
 mod helix;
+mod helical_thread;
+#[cfg(test)]
+mod helical_thread_tests;
 pub mod history;
 mod iges_in;
 mod iges_out;
@@ -175,6 +178,10 @@ pub use fair::{
 };
 pub use fill::{PATCH_ANGLE_TOL_DEG, PatchReport, PatchSpec, patch_edges_crowned, patch_edges_report, patch_edges_with};
 pub use helix::{loft_to_point, sweep_helix, sweep_helix_mesh};
+pub use helical_thread::{
+    HELIX_PIECE, external_ridge_thread, helix_approximation_errors, internal_thread_tube, plate_with_plain_and_internal_thread, tap_radius,
+    try_replace_cylinder_with_helical_thread, try_replace_external_cylinder_with_helical_thread,
+};
 pub use iges_in::{MAX_IGES_BYTES, iges_import, iges_to_step};
 pub use iges_out::iges_export_bodies;
 pub use lip::{raise_band, rim_band};
@@ -193,7 +200,7 @@ pub use polybool::{faceted_boolean, planar_boolean};
 pub use polyhedron::{HalfSpace, convex_polyhedron, draft, offset_faces, shell};
 pub use prism::{PLANAR_FIT_TOL, extrude_planar_regions, planar_regions_boolean};
 pub use prism_measure::certified_prism_equivalent;
-pub use sew::{EdgeSpec, FaceSpec, SurfSpec, sew, sew_touching};
+pub use sew::{EdgeSpec, FaceSpec, SurfSpec, sew, sew_open, sew_touching};
 pub use splitface::{SplitTool, split_body, split_faces, split_faces_with_map};
 pub use step::step_export;
 pub use step_in::{
