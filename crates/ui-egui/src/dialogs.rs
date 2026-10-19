@@ -302,14 +302,27 @@ pub struct HoleOpts {
     /// Drill point: an angled tip instead of a flat bottom.
     pub angled: bool,
     pub tip_angle: String,
-    /// Tap type: tapped (a cosmetic thread) instead of simple.
+    /// Tap type: tapped instead of simple.
     pub tapped: bool,
     pub thread: String,
+    /// Cut the helical profile. Off for a new tap; an edited hole keeps what it saved.
+    pub modeled: bool,
+    /// The tap-drill diameter was typed by the user; changing the thread size leaves it alone.
+    pub tap_diameter_override: bool,
 }
 
 impl Default for HoleOpts {
     fn default() -> Self {
-        HoleOpts { multiple: false, all: false, angled: true, tip_angle: "118 deg".into(), tapped: false, thread: "M5".into() }
+        HoleOpts {
+            multiple: false,
+            all: false,
+            angled: true,
+            tip_angle: "118 deg".into(),
+            tapped: false,
+            thread: "M5".into(),
+            modeled: false,
+            tap_diameter_override: false,
+        }
     }
 }
 
@@ -523,7 +536,7 @@ impl Dialog {
             "solid.pipe" => Dialog::new(Kind::Pipe { diameter: "5 mm".into(), wall: String::new() }, vec![SelInput::new("Path", CURVES, true)]),
             "solid.bounding_solid" => Dialog::new(Kind::Stock { margin: "2 mm".into() }, vec![SelInput::new("Bodies (all if none)", BODIES, true)]),
             "construct.plane.offset" => {
-                Dialog::new(Kind::OffsetPlane { offset: "10 mm".into() }, vec![SelInput::new("Plane", PLANES | PLANAR_FACES, false)])
+                Dialog::new(Kind::OffsetPlane { offset: "0 mm".into() }, vec![SelInput::new("Plane", PLANES | PLANAR_FACES, false)])
             }
             "construct.plane.midplane" => Dialog::new(
                 Kind::Midplane,
@@ -1036,6 +1049,22 @@ fn default_profiles(s: &Session) -> Vec<Sel> {
     }
 }
 
+/// The sketch point (its sketch and id) a Single hole's face place `x` sits on: the one it was
+/// opened at, else a point a shown sketch shows exactly there (where a pick snapped to it).
+fn single_hole_point(app: &SolveApp, d: &Dialog, x: &Sel) -> Option<(u64, String)> {
+    let Sel::Face { point, .. } = x else { return None };
+    if let Some(k) = d.extra.get("single_point").filter(|k| k["point"] == pt3(*point)) {
+        return Some((k["sketch"].as_u64()?, k["id"].as_str()?.to_string()));
+    }
+    let st = app.session.world_state();
+    crate::viewport::visible_sketches(app).into_iter().find_map(|sid| {
+        let ss = st.sketch(sid)?;
+        let shown = SnapPoints::of(&ss.sketch);
+        let p = ss.sketch.points.iter().find(|p| shown.takes(p) && ss.plane.to_world(p.pos).dist(*point) < 1e-9)?;
+        Some((sid, p.id.clone()))
+    })
+}
+
 /// Does an input take face places that snap to sketch points on the face (the Single hole's)?
 pub(crate) fn snaps_to_points(accept: Accept) -> bool {
     accept & selection::POINTS != 0 && accept & PLANAR_FACES != 0
@@ -1377,7 +1406,7 @@ fn tr(text: &str) -> &str {
 }
 
 /// A dialog row's widget, for scenarios and demos: the handle `dialog:<row label>`.
-fn publish_row(r: &egui::Response) {
+pub(crate) fn publish_row(r: &egui::Response) {
     ROW.with(|row| crate::scenario::publish_handle(&format!("dialog:{}", row.borrow()), r.rect.center()));
 }
 
@@ -1864,6 +1893,11 @@ fn error_rows(app: &mut SolveApp, ctx: &egui::Context, d: &mut Dialog, ui: &mut 
     {
         d.refuse(app, error);
     }
+    // For Corner dialogs (fillet/chamfer), propagate preview errors to `d.error`
+    // so impossible sizes still show a refusal message and tests can check it.
+    if matches!(d.kind, Kind::SketchModify(crate::sketch_modify_ui::Mod::Corner { .. })) && app.preview.error.is_some() && d.error.is_none() {
+        d.error = app.preview.error.clone();
+    }
     if let Some(error) = d.error.as_ref().or(app.preview.error.as_ref()).cloned() {
         if !full_width {
             row_label(ui, "");
@@ -2208,6 +2242,11 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     let has_ok = !matches!(d.kind, Kind::Sketch | Kind::Params { .. } | Kind::Measure { .. });
     let valid = match &d.kind {
         Kind::SaveMesh(_) => crate::dialogs_save_mesh::ready(&d.inputs),
+        Kind::SketchModify(crate::sketch_modify_ui::Mod::Corner { .. }) => {
+            // Corner dialogs: preview errors are visual only; validation errors from
+            // `apply_commands` go to `d.error`. OK stays enabled when the preview fails.
+            !has_ok || (built.unwrap_or_else(|| apply_commands(app, &d).is_ok()))
+        }
         _ => !has_ok || !d.previews() || (built.unwrap_or_else(|| apply_commands(app, &d).is_ok()) && app.preview.error.is_none()),
     };
     let width = if wide { crate::frame::Width::Wide } else { crate::frame::Width::Normal };
@@ -2898,13 +2937,34 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                         row_label(ui, "Hole Tap Type");
                         let mut tap = usize::from(opts.tapped);
                         combo(ui, "hole_tap", &["Simple", "Tapped"], &mut tap);
-                        opts.tapped = tap == 1;
+                        let tapped = tap == 1;
+                        if opts.tapped && !tapped {
+                            opts.modeled = false;
+                            opts.tap_diameter_override = false;
+                        }
+                        if !opts.tapped && tapped {
+                            opts.tap_diameter_override = false;
+                            sync_tapped_hole_diameter(diameter, &opts.thread);
+                        }
+                        opts.tapped = tapped;
                         ui.end_row();
                         if opts.tapped {
+                            row_label(ui, "Modeled");
+                            ui.checkbox(&mut opts.modeled, "Cut the thread");
+                            ui.end_row();
                             row_label(ui, "Size");
+                            let before = opts.thread.clone();
                             let r = ui.add(egui::TextEdit::singleline(&mut opts.thread).hint_text("M5"));
                             enter |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            if opts.thread != before && !opts.tap_diameter_override {
+                                sync_tapped_hole_diameter(diameter, &opts.thread);
+                            }
                             ui.end_row();
+                            if let Some((major, _)) = solidcraft_engine::doc::parse_metric_thread(&opts.thread) {
+                                row_label(ui, "Nominal Diameter");
+                                ui.label(format!("{} mm", show_thread_mm(major)));
+                                ui.end_row();
+                            }
                         }
                         if *kind == 0 {
                             row_label(ui, "Drill Point");
@@ -2923,8 +2983,12 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                             enter |= field(ui, &mut opts.tip_angle);
                             ui.end_row();
                         }
-                        row_label(ui, "Diameter");
+                        row_label(ui, if opts.tapped { "Tap-Drill Diameter" } else { "Diameter" });
+                        let before = diameter.clone();
                         enter |= field(ui, diameter);
+                        if opts.tapped && *diameter != before {
+                            opts.tap_diameter_override = true;
+                        }
                         ui.end_row();
                         if *kind == 1 {
                             row_label(ui, "Counterbore Ø");
@@ -3370,6 +3434,19 @@ fn stored_length(s: &Session, e: &str) -> String {
     if s.doc.with_design_unit(e, ValueKind::Length) == e { e.to_string() } else { format!("{} mm", e.trim()) }
 }
 
+/// A stored value as its edit field shows it (#1936): a bare number is written with the unit the
+/// engine reads it in, "2" as "2 mm" for a length and "5" as "5 deg" for an angle, so the field
+/// and the on-canvas tag name the unit as the other dialogs do. The number keeps its stored text.
+/// Counts, units already written, parameter names, expressions and empty text show as stored.
+pub(crate) fn shown_expr(e: &str, kind: ValueKind) -> String {
+    let unit = match kind {
+        ValueKind::Length => "mm",
+        ValueKind::Angle => "deg",
+        _ => return e.to_string(),
+    };
+    if solidcraft_engine::doc::expr::is_bare_number(e) { format!("{} {unit}", e.trim()) } else { e.to_string() }
+}
+
 fn hole_defaults() -> Kind {
     Kind::Hole {
         diameter: "5 mm".into(),
@@ -3380,6 +3457,23 @@ fn hole_defaults() -> Kind {
         cs_diameter: "10 mm".into(),
         cs_angle: "90 deg".into(),
         opts: HoleOpts::default(),
+    }
+}
+
+/// A metric length as the Hole dialog shows it ("4.2 mm", "5 mm").
+fn show_thread_mm(mm: f64) -> String {
+    if (mm - mm.round()).abs() < 1e-9 {
+        format!("{}", mm.round())
+    } else {
+        format!("{mm}")
+    }
+}
+
+/// Fill the Hole diameter field with the conventional tap drill for `thread`.
+pub(crate) fn sync_tapped_hole_diameter(diameter: &mut String, thread: &str) {
+    if let Some((major, pitch)) = solidcraft_engine::doc::parse_metric_thread(thread) {
+        let drill = solidcraft_engine::doc::tap_drill_diameter(major, pitch);
+        *diameter = format!("{} mm", show_thread_mm(drill));
     }
 }
 
@@ -4213,7 +4307,12 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
                     }
                     taken.extend(crate::viewport::grouped_selection(s, x));
                     let kept = d.extra.get("position_exprs").filter(|k| face_point(x).is_some_and(|p| p == k["point"])).map(|k| k["at"].clone());
-                    places.extend(face_point(x).map(|p| json!({ "position": kept.unwrap_or(p) })));
+                    // A place snapped to a sketch point keeps the point, so the hole follows it (#2110).
+                    let snapped = if kept.is_none() { single_hole_point(app, d, x) } else { None };
+                    places.extend(face_point(x).map(|p| match snapped {
+                        Some((sk, id)) => json!({"sketch": sk, "points": [id], "single": true}),
+                        None => json!({ "position": kept.unwrap_or(p) }),
+                    }));
                 }
             }
             let mut out = Vec::new();
@@ -4231,6 +4330,9 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
                 }
                 if opts.tapped && !opts.thread.trim().is_empty() {
                     params["thread"] = json!(opts.thread.trim());
+                    if opts.modeled {
+                        params["modeled"] = json!(true);
+                    }
                 }
                 match *kind {
                     1 => {
@@ -4819,17 +4921,26 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
             d.extra.insert("pull".into(), pt3(pull.0));
             d
         }
-        FeatureKind::Hole { position, at, direction, diameter, depth, hole, points, thread, to } => {
+        FeatureKind::Hole { position, at, direction, diameter, depth, hole, points, thread, modeled, to } => {
             let mut d = start("solid.hole")?;
             let mut k = hole_defaults();
             if let Kind::Hole { diameter: dia, depth: dep, kind, cb_diameter, cb_depth, cs_diameter, cs_angle, opts } = &mut k {
                 *dia = diameter.to_string();
                 opts.all = depth.is_none();
                 opts.angled = matches!(hole, HoleKind::Drilled { .. });
-                opts.multiple = points.is_some();
+                opts.multiple = points.as_ref().is_some_and(|sp| !sp.single);
                 if let Some(th) = thread {
                     opts.tapped = true;
                     opts.thread = th.clone();
+                    opts.modeled = *modeled;
+                    // A stored bore that is not the conventional tap drill is an explicit override.
+                    if let Some((major, pitch)) = solidcraft_engine::doc::parse_metric_thread(th) {
+                        let drill = solidcraft_engine::doc::tap_drill_diameter(major, pitch);
+                        let want_mm = format!("{} mm", show_thread_mm(drill));
+                        let want_bare = show_thread_mm(drill);
+                        let got = dia.trim();
+                        opts.tap_diameter_override = got != want_mm && got != want_bare;
+                    }
                 }
                 if let Some(dd) = depth {
                     *dep = dd.to_string();
@@ -4853,6 +4964,20 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
             }
             d.kind = k;
             match points {
+                Some(sp) if sp.single => {
+                    // A Single hole at a sketch point: picked on its face where the point is now.
+                    let id = sp.ids.first().cloned().unwrap_or_default();
+                    let st = s.world_state();
+                    let at = st
+                        .sketch(sp.sketch.0)
+                        .and_then(|ss| ss.sketch.points.iter().find(|p| p.id == id).map(|p| ss.plane.to_world(p.pos)))
+                        .unwrap_or(position.0);
+                    if let Some(inp) = d.inputs.first_mut() {
+                        inp.items = vec![face_sel(s, at).unwrap_or(Sel::Face { body: String::new(), index: 0, point: at })];
+                    }
+                    d.extra.insert("direction".into(), pt3(direction.0));
+                    d.extra.insert("single_point".into(), json!({"point": pt3(at), "sketch": sp.sketch.0, "id": id}));
+                }
                 Some(sp) => {
                     d.inputs = vec![SelInput::new("Points", selection::POINTS, true)];
                     if let Some(inp) = d.inputs.first_mut() {

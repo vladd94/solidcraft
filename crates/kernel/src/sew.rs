@@ -282,7 +282,7 @@ impl Cache {
 
 /// Sew the faces into a closed solid.
 pub fn sew(faces: &[FaceSpec]) -> Result<Body> {
-    sew_impl(faces, false, None).map(|(body, _)| body)
+    sew_impl(faces, false, None, false).map(|(body, _)| body)
 }
 
 /// Sew the faces into a closed solid that may touch itself: where four faces meet along a
@@ -290,7 +290,13 @@ pub fn sew(faces: &[FaceSpec]) -> Result<Body> {
 /// their own (see [`touching_sheets`]), and where faces meet at a point in fans joined by no edge
 /// (a hole's corner on its face's outline), each fan gets a vertex of its own.
 pub fn sew_touching(faces: &[FaceSpec]) -> Result<Body> {
-    sew_impl(faces, true, None).map(|(body, _)| body)
+    sew_impl(faces, true, None, false).map(|(body, _)| body)
+}
+
+/// Sew faces into a body that may remain an open shell (free edges allowed). Used to build
+/// helical thread walls that later stitch into a plate after its cylinder face is removed.
+pub fn sew_open(faces: &[FaceSpec]) -> Result<Body> {
+    sew_impl(faces, false, None, true).map(|(body, _)| body)
 }
 
 /// Separate boundary sheets at a shared geometric edge without moving it.
@@ -301,7 +307,7 @@ pub(crate) fn sew_touching_with_sources(faces: &[FaceSpec], sources: &[Option<cr
     if sources.len() != faces.len() {
         return Err(KernelError::Invalid("sew source alignment".into()));
     }
-    sew_impl(faces, true, Some(sources))
+    sew_impl(faces, true, Some(sources), false)
 }
 
 type EdgeUse = (usize, usize, usize);
@@ -769,9 +775,14 @@ fn split_vertex_fans(faces: Vec<mt::Face>) -> Result<Vec<mt::Face>> {
         .collect()
 }
 
-fn sew_impl(faces: &[FaceSpec], touching: bool, sources: Option<&[Option<crate::FaceSource>]>) -> Result<(Body, Option<Vec<usize>>)> {
-    if faces.len() < 4 || faces.len() > 200_000 {
-        return Err(KernelError::Invalid("a solid needs 4…200000 faces".into()));
+fn sew_impl(faces: &[FaceSpec], touching: bool, sources: Option<&[Option<crate::FaceSource>]>, allow_open: bool) -> Result<(Body, Option<Vec<usize>>)> {
+    let min_faces = if allow_open { 1 } else { 4 };
+    if faces.len() < min_faces || faces.len() > 200_000 {
+        return Err(KernelError::Invalid(if allow_open {
+            "sew_open: face count out of range".into()
+        } else {
+            "a solid needs 4…200000 faces".into()
+        }));
     }
     let mut edge_uses = 0usize;
     for f in faces {
@@ -863,6 +874,16 @@ fn sew_impl(faces: &[FaceSpec], touching: bool, sources: Option<&[Option<crate::
         }
         // Faces keep their identity into the solid (grouped into shells) and the body.
         let built: HashMap<mt::FaceID, usize> = out.iter().enumerate().map(|(i, f)| (f.id(), i)).collect();
+        if allow_open {
+            let from = out.iter().map(|f| built.get(&f.id()).copied()).collect();
+            let body = crate::surfaces::body_of(out, &[], &crate::record::Rebuild::default())?;
+            let mapped = body
+                .solid
+                .face_iter()
+                .map(|f| source_ids.get(&f.id()).filter(|(o, _)| *o == f.orientation()).map(|(_, s)| (*s).clone()))
+                .collect();
+            return Ok((body.with_face_sources(sources.map(|_| std::sync::Arc::new(mapped))), from));
+        }
         let shells = closed_components(out)?;
         let solid = Solid::try_new(shells).map_err(|e| KernelError::Failed(format!("sew: the faces do not close: {e}")))?;
         let from = solid.face_iter().map(|f| built.get(&f.id()).copied()).collect();
