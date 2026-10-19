@@ -59,6 +59,11 @@ Work the part out as numbers first. Then build it in a few large `batch` calls, 
 ## Finish
 `export {path}` writes `.step` for CAD, `.3mf`/`.stl` for printing, or `.urdf` (an assembly with joints, for robot simulators). `save {path}` writes `.solidcraft`.
 
+**Modeled multi-hole threads and Cloud Agent downloads:** see `reference.md` sections
+“Modeled tapped holes” and “Export design JSON and STEP”. Reusable control-channel script:
+`scripts/export_plate_holes.py` (plate + N modeled M5 holes → JSON/STEP under
+`/opt/cursor/artifacts/`, optional GitHub push for raw download URLs).
+
 ## Red flags
 
 | Thought | Do instead |
