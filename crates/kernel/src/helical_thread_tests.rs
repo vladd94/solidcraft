@@ -807,3 +807,193 @@ fn investigate_try_replace_stitch_hang() {
         }
     }
 }
+
+/// Cheap structural checks (no `validity()`, no tess/volume). Used after `try_replace`, which
+/// already performed one bounded closed-shell validity check.
+fn assert_curved_trimmed_thread(b: &Body, origin: Vec3, tap: f64, z_lo: f64, z_hi: f64, min_flanks: usize) {
+    assert!(!b.is_surface(), "must be a solid, not an open shell");
+    assert_eq!(b.shell_count(), 1, "single shell");
+    let mid = origin + Vec3::Z * (0.5 * (z_lo + z_hi));
+    assert!(!b.contains(mid), "bore must be empty at {mid:?}");
+    let (_, cylinders, _, unknown) = count_surfaces(b);
+    assert!(unknown >= min_flanks, "B-spline flanks: got {unknown}, need ≥{min_flanks}; cyl={cylinders}");
+    assert!(cylinders >= 2, "analytic crest/root cylinders: {cylinders}");
+    // No artificial radial planar end-cap inside the bore.
+    for i in 0..b.face_count() {
+        let Some(FaceSurface::Plane { point, normal }) = face_surface(b, i) else { continue };
+        let n = normal.normalized().unwrap_or(Vec3::Z);
+        if n.z.abs() > 0.85 {
+            continue;
+        }
+        let rad = ((point.x - origin.x).powi(2) + (point.y - origin.y).powi(2)).sqrt();
+        assert!(
+            !(rad < tap + 0.7 && point.z > z_lo + 0.3 && point.z < z_hi - 0.3),
+            "artificial radial end face at {point:?} n={n:?}"
+        );
+    }
+    // Entry/exit hole wires lie on the plate planes.
+    for (z_face, label) in [(z_lo, "bottom"), (z_hi, "top")] {
+        let mut samples = 0usize;
+        for i in 0..b.face_count() {
+            let Some(FaceSurface::Plane { point, normal }) = face_surface(b, i) else { continue };
+            let n = normal.normalized().unwrap_or(Vec3::Z);
+            if (point.z - z_face).abs() > 1e-3 || n.z.abs() < 0.9 {
+                continue;
+            }
+            let f = b.solid.face_iter().nth(i).expect("face");
+            for w in f.absolute_boundaries().iter().skip(1) {
+                for e in w.edge_iter() {
+                    use truck_modeling::{BoundedCurve, ParametricCurve};
+                    let c = e.curve();
+                    let (t0, t1) = c.range_tuple();
+                    for k in 0..=4 {
+                        let t = t0 + (t1 - t0) * k as f64 / 4.0;
+                        let p = crate::body::from_p3(c.subs(t));
+                        let r = ((p.x - origin.x).powi(2) + (p.y - origin.y).powi(2)).sqrt();
+                        if r < 2.6 {
+                            assert!((p.z - z_face).abs() < 1e-3, "{label} entry off plane: {p:?}");
+                            samples += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(samples >= 8, "{label} entry samples={samples}");
+    }
+}
+
+/// Pre-Phase-B gate: production single-hole path keeps curved flanks and plane-trimmed entries.
+/// Relies on the one validity inside `try_replace` — does not re-invoke it.
+#[test]
+fn phase_b_precheck_single_hole_curved_trimmed_entry() {
+    let major = 5.0_f64;
+    let pitch = 0.8_f64;
+    let tap = tap_radius(major, pitch);
+    let stock = box_solid(Vec3::ZERO, Vec3::new(40.0, 50.0, 10.0)).unwrap();
+    let hole = cylinder(Vec3::new(20.0, 25.0, -1.0), Vec3::Z, tap, 12.0).unwrap();
+    let plate = boolean(&stock, &hole, BoolOp::Cut).unwrap().unwrap();
+    let on = Vec3::new(20.0, 25.0 + tap, 5.0);
+    let t0 = std::time::Instant::now();
+    let threaded = try_replace_cylinder_with_helical_thread(&plate, on, major, pitch).expect("single-hole try_replace");
+    eprintln!("phase_b_precheck try_replace {:?}", t0.elapsed());
+    assert_curved_trimmed_thread(&threaded, Vec3::new(20.0, 25.0, 0.0), tap, 0.0, 10.0, 2);
+    eprintln!(
+        "phase_b_precheck OK faces={} surfaces={:?}",
+        threaded.face_count(),
+        count_surfaces(&threaded)
+    );
+}
+
+/// Phase B — four sequential modeled M5×0.8 through-holes on a 60×60×10 plate.
+/// Each hole: boolean cut → try_replace (one validity inside). After each hole, structural
+/// checks confirm the new solid and that prior threads remain. STEP export + surface report.
+#[test]
+fn phase_b_four_sequential_m5_modeled_through_holes() {
+    use std::time::Instant;
+
+    let major = 5.0_f64;
+    let pitch = 0.8_f64;
+    let tap = tap_radius(major, pitch);
+    let centers = [(15.0, 15.0), (45.0, 15.0), (15.0, 45.0), (45.0, 45.0)];
+    let stock = box_solid(Vec3::ZERO, Vec3::new(60.0, 60.0, 10.0)).expect("stock");
+    let mut body = stock;
+    let mut last_ok: Option<Body> = None;
+    let mut timings: Vec<(usize, f64, f64, usize, usize)> = Vec::new(); // i, boolean_s, replace_s, faces, flanks
+
+    for (i, &(x, y)) in centers.iter().enumerate() {
+        let t_bool = Instant::now();
+        let hole = cylinder(Vec3::new(x, y, -1.0), Vec3::Z, tap, 12.0).expect("cyl");
+        let cut = match boolean(&body, &hole, BoolOp::Cut) {
+            Ok(Some(b)) => b,
+            Ok(None) => {
+                if let Some(prev) = &last_ok {
+                    let step = step_export(&[prev], "phase_b_last_ok").unwrap_or_default();
+                    let _ = std::fs::write("/opt/cursor/artifacts/phase_b_last_ok.step", &step);
+                }
+                panic!("phase_b hole {i} boolean returned empty; preserved last_ok STEP");
+            }
+            Err(e) => {
+                if let Some(prev) = &last_ok {
+                    let step = step_export(&[prev], "phase_b_last_ok").unwrap_or_default();
+                    let _ = std::fs::write("/opt/cursor/artifacts/phase_b_last_ok.step", &step);
+                }
+                panic!("phase_b hole {i} boolean failed: {e}; preserved last_ok STEP");
+            }
+        };
+        let boolean_s = t_bool.elapsed().as_secs_f64();
+
+        // Remaining prior threads must still present as non-analytic flanks before replace.
+        if i > 0 {
+            let (_, _, _, flanks) = count_surfaces(&cut);
+            assert!(flanks >= 2 * i, "after boolean {i}: prior flanks={flanks}, need ≥{}", 2 * i);
+        }
+
+        let on = Vec3::new(x, y + tap, 5.0);
+        assert!(cylinder_face_at(&cut, on).is_some(), "hole {i} cylinder selectable before replace");
+        let t_rep = Instant::now();
+        let threaded = match try_replace_cylinder_with_helical_thread(&cut, on, major, pitch) {
+            Ok(b) => b,
+            Err(e) => {
+                if let Some(prev) = &last_ok {
+                    let step = step_export(&[prev], "phase_b_last_ok").unwrap_or_default();
+                    let _ = std::fs::write("/opt/cursor/artifacts/phase_b_last_ok.step", &step);
+                }
+                panic!("phase_b hole {i} try_replace failed: {e}; preserved last_ok STEP");
+            }
+        };
+        let replace_s = t_rep.elapsed().as_secs_f64();
+
+        assert_curved_trimmed_thread(&threaded, Vec3::new(x, y, 0.0), tap, 0.0, 10.0, 2 * (i + 1));
+        // Prior hole bores stay empty.
+        for &(px, py) in centers.iter().take(i + 1) {
+            assert!(!threaded.contains(Vec3::new(px, py, 5.0)), "bore ({px},{py}) filled after hole {i}");
+        }
+        // Untapped remaining holes stay analytic cylinders.
+        for &(ux, uy) in centers.iter().skip(i + 1) {
+            let c = cylinder_face_at(&threaded, Vec3::new(ux, uy + tap, 5.0));
+            assert!(c.is_some(), "remaining ({ux},{uy}) after hole {i}");
+            assert!((c.unwrap().radius - tap).abs() < 1e-3);
+        }
+
+        let (_, cyls, _, flanks) = count_surfaces(&threaded);
+        eprintln!(
+            "phase_b hole {i} @({x},{y}): boolean={boolean_s:.3}s replace={replace_s:.3}s faces={} cyl={cyls} flank={flanks}",
+            threaded.face_count()
+        );
+        timings.push((i, boolean_s, replace_s, threaded.face_count(), flanks));
+        last_ok = Some(threaded.clone());
+        body = threaded;
+    }
+
+    assert!(body.face_count() < 200, "compact curved B-rep: {}", body.face_count());
+    let (_, cyls, _, flanks) = count_surfaces(&body);
+    assert!(flanks >= 8, "four flank pairs: {flanks}");
+    assert!(cyls >= 8, "crest/root cylinders across four holes: {cyls}");
+
+    let t_export = Instant::now();
+    let step = step_export(&[&body], "Phase B 60x60 4xM5 meridional").expect("STEP export");
+    let export_s = t_export.elapsed().as_secs_f64();
+    std::fs::create_dir_all("/opt/cursor/artifacts").ok();
+    std::fs::write("/opt/cursor/artifacts/phase_b_60x60_4xM5.step", &step).expect("write STEP");
+    eprintln!("phase_b STEP export {export_s:.3}s bytes={}", step.len());
+
+    let t_imp = Instant::now();
+    let imported = step_import(&step).expect("STEP import").bodies.remove(0).body;
+    let import_s = t_imp.elapsed().as_secs_f64();
+    // Structural only on import — do not pay a second validity on the unchanged solid.
+    assert!(!imported.is_surface() && imported.shell_count() == 1);
+    let after = count_surfaces(&imported);
+    assert!(after.1 >= 8 && after.3 >= 8, "STEP surfaces cyl/flank: {after:?}");
+    eprintln!("phase_b STEP import {import_s:.3}s faces={} surfaces={after:?}", imported.face_count());
+
+    let mut report = String::from("# Phase B — 60×60×10 four sequential M5×0.8\n\n");
+    report.push_str("| hole | boolean_s | replace_s (incl. sew/stitch/1×validity) | faces | flanks |\n|---|---|---|---|---|\n");
+    for (i, b, r, f, fl) in &timings {
+        report.push_str(&format!("| {i} | {b:.3} | {r:.3} | {f} | {fl} |\n"));
+    }
+    report.push_str(&format!(
+        "\nSTEP export: {export_s:.3}s ({} bytes)\nSTEP import structural: {import_s:.3}s surfaces={after:?}\n",
+        step.len()
+    ));
+    std::fs::write("/opt/cursor/artifacts/phase_b_timings.md", report).ok();
+}

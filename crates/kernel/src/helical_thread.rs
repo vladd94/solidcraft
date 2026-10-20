@@ -648,15 +648,21 @@ pub fn try_replace_cylinder_with_helical_thread(body: &Body, on_face: Vec3, majo
     // Mandatory topology audit of the wall FaceSpecs before any sew/stitch.
     let wall_specs =
         crate::helical_thread_trim::internal_thread_wall_face_specs(origin, k, u, major, pitch, cyl.radius, z_lo, z_hi)?;
+    let t_sew = std::time::Instant::now();
     let wall = crate::sew_open(&wall_specs.faces)?;
+    let sew_ms = t_sew.elapsed();
     let bot_entry = wall_specs.bot_entry;
     let top_entry = wall_specs.top_entry;
     // Topology audit of the Boolean remnant vs fixture: free-edge matching is complete
     // (wall↔caps 8/8). Opposite-parity entry reverses (`br != tr`) leave a Regular open
     // shell; Truck `validity()` on those opens is extremely expensive (tens of seconds) and
     // was the perceived "stitch hang". Same-parity reverses close the shell. Prefer those
-    // first; only then try the normal-derived pair. Never call `validity()` until the body
-    // is a single non-surface solid, and never tessellate for volume here.
+    // first; only then try the normal-derived pair.
+    //
+    // Performance: one full `validity()` per newly constructed solid, only after cheap
+    // structural prechecks (`!is_surface`, single shell, empty bore). Never tessellate for
+    // volume here. Budget ~90s (observed closed-shell cost); exceeding it fails loudly.
+    const VALIDITY_BUDGET: std::time::Duration = std::time::Duration::from_secs(90);
     let prefer_bot = bot_normal.dot(k) > 0.0;
     let prefer_top = top_normal.dot(k) > 0.0;
     let mut order = vec![
@@ -670,6 +676,10 @@ pub fn try_replace_cylinder_with_helical_thread(body: &Body, on_face: Vec3, majo
     order.dedup();
     let mut last_err = KernelError::Failed("helical thread stitch produced no closed solid".into());
     let mid = origin + k * (0.5 * (z_lo + z_hi));
+    let timing = std::env::var_os("SOLIDCRAFT_THREAD_TIMING").is_some();
+    if timing {
+        eprintln!("try_replace: sew_open {sew_ms:?}");
+    }
     for (br, tr) in order {
         let bottom = match crate::helical_thread_trim::replace_bore_wire_on_face(&bot_mt, origin, k, cyl.radius, bot_entry.clone(), br, rim_tol) {
             Ok(b) => b,
@@ -685,25 +695,43 @@ pub fn try_replace_cylinder_with_helical_thread(body: &Body, on_face: Vec3, majo
                 continue;
             }
         };
-        match crate::stitch(&[&open, &wall, &bottom, &top], pitch * 1e-4) {
+        let t_stitch = std::time::Instant::now();
+        let stitched = crate::stitch(&[&open, &wall, &bottom, &top], pitch * 1e-4);
+        let stitch_ms = t_stitch.elapsed();
+        if timing {
+            eprintln!("try_replace: stitch br={br} tr={tr} {stitch_ms:?}");
+        }
+        match stitched {
             Ok(b) if !b.is_surface() && b.shell_count() == 1 => {
-                // Closed solid — safe to validate. Skip tess/volume (expensive on plane∩ flanks).
-                if !b.validity().is_empty() {
-                    last_err = KernelError::Failed(format!(
-                        "helical thread stitch closed but validity failed: {:?}",
-                        b.validity()
-                    ));
+                // Cheap orientation precheck before the expensive closed-shell validity.
+                let candidate = if !b.contains(mid) {
+                    b
+                } else if let Ok(inv) = invert_shell(&b) {
+                    if inv.is_surface() || inv.shell_count() != 1 || inv.contains(mid) {
+                        last_err = KernelError::Failed("helical thread stitch closed but filled the bore".into());
+                        continue;
+                    }
+                    inv
+                } else {
+                    last_err = KernelError::Failed("helical thread stitch closed but filled the bore".into());
+                    continue;
+                };
+                let t_val = std::time::Instant::now();
+                let bad = candidate.validity();
+                let validity_ms = t_val.elapsed();
+                if timing {
+                    eprintln!("try_replace: validity br={br} tr={tr} {validity_ms:?} issues={}", bad.len());
+                }
+                if validity_ms > VALIDITY_BUDGET {
+                    return Err(KernelError::Failed(format!(
+                        "helical thread validity exceeded budget ({validity_ms:?} > {VALIDITY_BUDGET:?}); shells=1 surface=false issues={bad:?}"
+                    )));
+                }
+                if !bad.is_empty() {
+                    last_err = KernelError::Failed(format!("helical thread stitch closed but validity failed: {bad:?}"));
                     continue;
                 }
-                if !b.contains(mid) {
-                    return Ok(b);
-                }
-                if let Ok(inv) = invert_shell(&b) {
-                    if !inv.is_surface() && inv.shell_count() == 1 && inv.validity().is_empty() && !inv.contains(mid) {
-                        return Ok(inv);
-                    }
-                }
-                last_err = KernelError::Failed("helical thread stitch closed but filled the bore".into());
+                return Ok(candidate);
             }
             Ok(b) => {
                 // Open / multi-shell: do not call validity() — it stalls on Regular opens.
