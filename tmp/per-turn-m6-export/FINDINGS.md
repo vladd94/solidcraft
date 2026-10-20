@@ -11,7 +11,7 @@
 
 ## Executive summary
 
-The exported solid is a closed, valid curved B-rep with exact **0.8 mm** pitch and a natural plane� B-rep with exact **0.8 mm** pitch and a natural plane∩ entrance. The concentric / poorly shaded viewport look is **not** primarily bad ISO math — it comes from **`tess::plan` rejecting a flank face**, then **`Body::tessellate` falling back to Truck’s mesh**, which produces a ring-like display mesh.
+The exported solid is a closed, valid curved B-rep with exact **0.8 mm** pitch and a natural plane-intersection entrance. The concentric / poorly shaded viewport look is **not** primarily bad ISO math — it comes from **`tess::plan` rejecting a flank face**, then **`Body::tessellate` falling back to Truck’s mesh**, which produces a ring-like display mesh.
 
 | Area | Verdict |
 |------|---------|
