@@ -1,0 +1,135 @@
+{
+  "about": {
+    "design": "ui_current",
+    "format": "solidcraft/28",
+    "replay": "solidcraft-cli eval script.json (timeline.add steps need a build that reads this design format)",
+    "version": "0.16.2"
+  },
+  "commands": [
+    {
+      "command": "timeline.add",
+      "params": {
+        "feature": {
+          "id": 1,
+          "name": "Sketch1",
+          "plane": {
+            "name": "XY",
+            "type": "origin"
+          },
+          "sketch": {
+            "constraints": [],
+            "counters": {
+              "c": 1
+            },
+            "curves": [
+              {
+                "c": 0,
+                "construction": false,
+                "id": "c1",
+                "r": 38.91657744458009,
+                "type": "circle"
+              }
+            ],
+            "points": [
+              {
+                "fixed": true,
+                "id": "origin",
+                "pos": [
+                  0.0,
+                  0.0
+                ]
+              }
+            ]
+          },
+          "suppressed": false,
+          "type": "sketch"
+        }
+      }
+    },
+    {
+      "command": "timeline.add",
+      "params": {
+        "feature": {
+          "extent": {
+            "convention": "total_distance",
+            "direction": "positive",
+            "distance": "10 mm"
+          },
+          "id": 2,
+          "name": "Extrude1",
+          "operation": "new_body",
+          "param_names": [
+            "d1"
+          ],
+          "profiles": {
+            "loops": [
+              [
+                "c1"
+              ]
+            ],
+            "type": "curves"
+          },
+          "sketch": 1,
+          "suppressed": false,
+          "type": "extrude"
+        }
+      }
+    },
+    {
+      "command": "timeline.add",
+      "params": {
+        "feature": {
+          "depth": "10 mm",
+          "diameter": "5 mm",
+          "direction": [
+            -0.0,
+            -0.0,
+            -1.0
+          ],
+          "face_names": [
+            "F2:top"
+          ],
+          "hole": {
+            "tip_angle": "118 deg",
+            "type": "drilled"
+          },
+          "id": 3,
+          "name": "Hole1",
+          "param_names": [
+            "d2",
+            "d3",
+            "d4"
+          ],
+          "position": [
+            28.083842298344294,
+            0.764851931492899,
+            10.000000000000014
+          ],
+          "suppressed": false,
+          "type": "hole"
+        }
+      }
+    },
+    {
+      "command": "timeline.add",
+      "params": {
+        "feature": {
+          "designation": "M6",
+          "face": [
+            30.16610112280314,
+            2.141596046648857,
+            7.366424769492426
+          ],
+          "face_names": [
+            "F3:bore:side:1"
+          ],
+          "id": 4,
+          "modeled": true,
+          "name": "Thread1",
+          "suppressed": false,
+          "type": "thread"
+        }
+      }
+    }
+  ]
+}
