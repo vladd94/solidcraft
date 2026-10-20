@@ -515,3 +515,295 @@ fn phase_a_wall_tessellates() {
     let mesh = wall.tessellate(0.3).expect("wall tess");
     eprintln!("wall tris={}", mesh.triangles.len());
 }
+
+/// Investigation: why try_replace stitch hangs while the Phase A fixture succeeds.
+/// No fine tess / volume checks. 90s stitch deadline.
+#[test]
+fn investigate_try_replace_stitch_hang() {
+    use std::time::{Duration, Instant};
+    use truck_modeling::{BoundedCurve, ParametricCurve};
+
+    fn edge_count(b: &Body) -> usize {
+        let mut n = 0usize;
+        let mut seen = std::collections::HashSet::new();
+        for f in b.solid.face_iter() {
+            for e in f.boundaries().iter().flat_map(|w| w.edge_iter()) {
+                if seen.insert(e.id()) {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+    fn free_edges(b: &Body) -> Vec<truck_modeling::Edge> {
+        let mut uses: std::collections::HashMap<truck_modeling::EdgeID, (usize, truck_modeling::Edge)> =
+            std::collections::HashMap::new();
+        for f in b.solid.face_iter() {
+            for e in f.boundaries().iter().flat_map(|w| w.edge_iter()) {
+                uses.entry(e.id()).or_insert((0, e.clone())).0 += 1;
+            }
+        }
+        uses.into_values().filter(|(n, _)| *n == 1).map(|(_, e)| e).collect()
+    }
+    fn edge_sample(e: &truck_modeling::Edge) -> (Vec3, Vec3, Vec3) {
+        let abs = if e.orientation() { e.clone() } else { e.inverse() };
+        let c = abs.curve();
+        let (t0, t1) = c.range_tuple();
+        (
+            crate::body::from_p3(c.subs(t0)),
+            crate::body::from_p3(c.subs(0.5 * (t0 + t1))),
+            crate::body::from_p3(c.subs(t1)),
+        )
+    }
+    /// Count free edges of `a` that have a geometrically matching free edge in `b` (ends+mid).
+    fn match_free(a: &Body, b: &Body, tol: f64) -> (usize, usize, usize) {
+        let fa = free_edges(a);
+        let fb = free_edges(b);
+        let mut matched = 0usize;
+        for ea in &fa {
+            let (a0, am, a1) = edge_sample(ea);
+            let hit = fb.iter().any(|eb| {
+                let (b0, bm, b1) = edge_sample(eb);
+                let same = (a0.dist(b0) <= tol && a1.dist(b1) <= tol) || (a0.dist(b1) <= tol && a1.dist(b0) <= tol);
+                same && am.dist(bm) <= tol * 10.0
+            });
+            if hit {
+                matched += 1;
+            }
+        }
+        (fa.len(), fb.len(), matched)
+    }
+
+    let tap = tap_radius(5.0, 0.8);
+    let pitch = 0.8_f64;
+    let major = 5.0_f64;
+    let on = Vec3::new(20.0, 25.0 + tap, 5.0);
+
+    // --- Production path inputs (mirror try_replace up to stitch) ---
+    let stock = box_solid(Vec3::ZERO, Vec3::new(40.0, 50.0, 10.0)).unwrap();
+    let hole = cylinder(Vec3::new(20.0, 25.0, -1.0), Vec3::Z, tap, 12.0).unwrap();
+    let plate = boolean(&stock, &hole, BoolOp::Cut).unwrap().unwrap();
+    let cyl = cylinder_face_at(&plate, on).expect("cyl");
+    let mut k = *cyl.axis;
+    let (mut z_lo, mut z_hi) = if cyl.start <= cyl.end { (cyl.start, cyl.end) } else { (cyl.end, cyl.start) };
+    let origin_t = cyl.axis_point;
+    if k.dot(Vec3::Z) < 0.0 {
+        k = -k;
+        let (a, b) = (-z_hi, -z_lo);
+        z_lo = a;
+        z_hi = b;
+    }
+    let rim_tol = (pitch * 1e-2).max(1e-3);
+    let (bot_face, top_face) =
+        crate::helical_thread_trim::cap_faces_for_bore(&plate, origin_t, k, cyl.radius, z_lo, z_hi, rim_tol).expect("caps");
+    let bot_mt = plate.solid.face_iter().nth(bot_face).cloned().unwrap();
+    let top_mt = plate.solid.face_iter().nth(top_face).cloned().unwrap();
+    let mut bore_faces = Vec::new();
+    let face_tol = (pitch * 1e-2).max(1e-3);
+    for i in 0..plate.face_count() {
+        let Some(FaceSurface::Cylinder { origin: o, axis, radius }) = face_surface(&plate, i) else {
+            continue;
+        };
+        let axis = *axis;
+        if (radius - cyl.radius).abs() > face_tol || axis.cross(k).len() > 1e-6 {
+            continue;
+        }
+        let radial = (o - origin_t) - k * (o - origin_t).dot(k);
+        if radial.len() > face_tol {
+            continue;
+        }
+        bore_faces.push(i);
+    }
+    let mut drop = bore_faces;
+    drop.push(bot_face);
+    drop.push(top_face);
+    drop.sort_unstable();
+    drop.dedup();
+    let open = crate::remove_faces(&plate, &drop).expect("open");
+    let u = k.any_perp();
+    let wall_specs =
+        crate::internal_thread_wall_face_specs(origin_t, k, u, major, pitch, cyl.radius, z_lo, z_hi).expect("wall specs");
+    let wall = crate::sew_open(&wall_specs.faces).expect("wall");
+    let bottom = crate::helical_thread_trim::replace_bore_wire_on_face(
+        &bot_mt,
+        origin_t,
+        k,
+        cyl.radius,
+        wall_specs.bot_entry.clone(),
+        false,
+        rim_tol,
+    )
+    .expect("bottom");
+    let top = crate::helical_thread_trim::replace_bore_wire_on_face(
+        &top_mt,
+        origin_t,
+        k,
+        cyl.radius,
+        wall_specs.top_entry.clone(),
+        true,
+        rim_tol,
+    )
+    .expect("top");
+
+    eprintln!("=== PRODUCTION stitch inputs ===");
+    eprintln!(
+        "open: faces={} edges={} free={}",
+        open.face_count(),
+        edge_count(&open),
+        free_edges(&open).len()
+    );
+    eprintln!(
+        "wall: faces={} edges={} free={}",
+        wall.face_count(),
+        edge_count(&wall),
+        free_edges(&wall).len()
+    );
+    eprintln!(
+        "bottom: faces={} edges={} free={}",
+        bottom.face_count(),
+        edge_count(&bottom),
+        free_edges(&bottom).len()
+    );
+    eprintln!(
+        "top: faces={} edges={} free={}",
+        top.face_count(),
+        edge_count(&top),
+        free_edges(&top).len()
+    );
+    let tol = pitch * 1e-4;
+    let (wf, bf, wbm) = match_free(&wall, &bottom, tol * 50.0);
+    let (wf2, tf, wtm) = match_free(&wall, &top, tol * 50.0);
+    let (of, bf2, obm) = match_free(&open, &bottom, tol * 50.0);
+    let (of2, tf2, otm) = match_free(&open, &top, tol * 50.0);
+    eprintln!("match wall↔bottom: wall_free={wf} bot_free={bf} matched={wbm}");
+    eprintln!("match wall↔top:    wall_free={wf2} top_free={tf} matched={wtm}");
+    eprintln!("match open↔bottom: open_free={of} bot_free={bf2} matched={obm}");
+    eprintln!("match open↔top:    open_free={of2} top_free={tf2} matched={otm}");
+
+    // Sample free edges of open (expect outer rectangle only — no bore rim).
+    let mut open_rims_near_bore = 0usize;
+    for e in free_edges(&open) {
+        let (_, m, _) = edge_sample(&e);
+        let axial = (m - origin_t).dot(k);
+        let rad = ((m - origin_t) - k * axial).len();
+        if rad < tap + 1.0 {
+            open_rims_near_bore += 1;
+            eprintln!("  open free near bore: mid={m:?} r={rad:.3} z={axial:.3}");
+        }
+    }
+    eprintln!("open free edges near bore (r < tap+1): {open_rims_near_bore}");
+
+    // --- Fixture path inputs ---
+    let (faces, audit) =
+        crate::plate_with_trimmed_thread_face_specs(40.0, 50.0, 10.0, (12.0, 25.0), (28.0, 25.0), major, pitch).expect("fixture specs");
+    assert_eq!(audit.same_direction_shares, 0);
+    let f_wall = crate::sew_open(&faces[0..4]).expect("f wall");
+    let f_bottom = crate::sew_open(&faces[4..5]).expect("f bottom");
+    let f_top = crate::sew_open(&faces[5..6]).expect("f top");
+    let f_sides = crate::sew_open(&faces[6..]).expect("f sides");
+    eprintln!("=== FIXTURE stitch inputs ===");
+    eprintln!(
+        "sides: faces={} edges={} free={}",
+        f_sides.face_count(),
+        edge_count(&f_sides),
+        free_edges(&f_sides).len()
+    );
+    eprintln!(
+        "wall: faces={} edges={} free={}",
+        f_wall.face_count(),
+        edge_count(&f_wall),
+        free_edges(&f_wall).len()
+    );
+    eprintln!(
+        "bottom: faces={} edges={} free={}",
+        f_bottom.face_count(),
+        edge_count(&f_bottom),
+        free_edges(&f_bottom).len()
+    );
+    eprintln!(
+        "top: faces={} edges={} free={}",
+        f_top.face_count(),
+        edge_count(&f_top),
+        free_edges(&f_top).len()
+    );
+
+    // Bounded stitch: fixture first (control), then production. Deadline enables stage diagnostics.
+    let dl = Instant::now() + Duration::from_secs(90);
+    let t_fix = Instant::now();
+    let fix = crate::stitch_deadline(&[&f_sides, &f_wall, &f_bottom, &f_top], pitch * 1e-4, dl);
+    eprintln!("fixture stitch_deadline → {:?} in {:?}", fix.as_ref().map(|b| b.face_count()), t_fix.elapsed());
+
+    let dl2 = Instant::now() + Duration::from_secs(90);
+    let t_prod = Instant::now();
+    let prod = crate::stitch_deadline(&[&open, &wall, &bottom, &top], pitch * 1e-4, dl2);
+    match &prod {
+        Ok(b) => eprintln!("production stitch_deadline → Ok(faces={}) in {:?}", b.face_count(), t_prod.elapsed()),
+        Err(e) => eprintln!("production stitch_deadline → Err({e}) in {:?}", t_prod.elapsed()),
+    }
+
+    // Report classification for the hang investigation (do not fail the fixture).
+    assert!(fix.is_ok(), "fixture stitch must still work: {fix:?}");
+    match &prod {
+        Ok(b) => {
+            eprintln!("PRODUCTION STITCH SUCCEEDED faces={} surface={}", b.face_count(), b.is_surface());
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            eprintln!("PRODUCTION STITCH FAILED/TIMED OUT: {msg}");
+        }
+    }
+
+    // Detail: which wall free edges fail to match bottom/top at stitch tolerance.
+    let st_tol = pitch * 1e-4;
+    eprintln!("=== unmatched wall free vs caps at stitch tol={st_tol:.3e} (mid tol×10) ===");
+    for (label, cap) in [("bottom", &bottom), ("top", &top)] {
+        let fb = free_edges(cap);
+        for (i, ea) in free_edges(&wall).iter().enumerate() {
+            let (a0, am, a1) = edge_sample(ea);
+            let hit = fb.iter().any(|eb| {
+                let (b0, bm, b1) = edge_sample(eb);
+                let same = (a0.dist(b0) <= st_tol && a1.dist(b1) <= st_tol) || (a0.dist(b1) <= st_tol && a1.dist(b0) <= st_tol);
+                same && am.dist(bm) <= st_tol * 10.0
+            });
+            if !hit {
+                let rad = ((am.x - origin_t.x).powi(2) + (am.y - origin_t.y).powi(2)).sqrt();
+                eprintln!("  wall free#{i} unmatched to {label}: ends=({a0:?})->({a1:?}) mid={am:?} r={rad:.3}");
+            }
+        }
+    }
+
+    // All four orientation trials — stitch only, no tess/volume.
+    eprintln!("=== orientation trials (90s each, no tess) ===");
+    for (br, tr) in [(false, true), (true, true), (false, false), (true, false)] {
+        let bottom = match crate::helical_thread_trim::replace_bore_wire_on_face(
+            &bot_mt, origin_t, k, cyl.radius, wall_specs.bot_entry.clone(), br, rim_tol,
+        ) {
+            Ok(b) => b,
+            Err(e) => { eprintln!("  br={br} tr={tr} bottom err {e}"); continue; }
+        };
+        let top = match crate::helical_thread_trim::replace_bore_wire_on_face(
+            &top_mt, origin_t, k, cyl.radius, wall_specs.top_entry.clone(), tr, rim_tol,
+        ) {
+            Ok(b) => b,
+            Err(e) => { eprintln!("  br={br} tr={tr} top err {e}"); continue; }
+        };
+        let dl = Instant::now() + Duration::from_secs(90);
+        let t0 = Instant::now();
+        match crate::stitch_deadline(&[&open, &wall, &bottom, &top], pitch * 1e-4, dl) {
+            Ok(b) => {
+                let t_val = Instant::now();
+                let val = b.validity();
+                eprintln!(
+                    "  br={br} tr={tr} → faces={} surface={} shells={} validity={:?} stitch={:?} validity_ms={:?}",
+                    b.face_count(),
+                    b.is_surface(),
+                    b.shell_count(),
+                    val,
+                    t0.elapsed(),
+                    t_val.elapsed()
+                );
+            }
+            Err(e) => eprintln!("  br={br} tr={tr} → Err({e}) in {:?}", t0.elapsed()),
+        }
+    }
+}
