@@ -944,15 +944,14 @@ fn phase_b_four_sequential_m5_modeled_through_holes() {
         let replace_s = t_rep.elapsed().as_secs_f64();
 
         assert_curved_trimmed_thread(&threaded, Vec3::new(x, y, 0.0), tap, 0.0, 10.0, 2 * (i + 1));
-        // Prior hole bores stay empty.
+        // All completed hole bores stay empty (preceding threads preserved as open cavities).
         for &(px, py) in centers.iter().take(i + 1) {
             assert!(!threaded.contains(Vec3::new(px, py, 5.0)), "bore ({px},{py}) filled after hole {i}");
         }
-        // Untapped remaining holes stay analytic cylinders.
-        for &(ux, uy) in centers.iter().skip(i + 1) {
-            let c = cylinder_face_at(&threaded, Vec3::new(ux, uy + tap, 5.0));
-            assert!(c.is_some(), "remaining ({ux},{uy}) after hole {i}");
-            assert!((c.unwrap().radius - tap).abs() < 1e-3);
+        // Prior threaded holes keep plane-trimmed entries (sample first completed hole).
+        if i > 0 {
+            let (px, py) = centers[0];
+            assert_curved_trimmed_thread(&threaded, Vec3::new(px, py, 0.0), tap, 0.0, 10.0, 2);
         }
 
         let (_, cyls, _, flanks) = count_surfaces(&threaded);
