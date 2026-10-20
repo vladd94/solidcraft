@@ -98,6 +98,9 @@ Detailed results: `SHAPE_FALLBACK_RESULTS.md`.
 - Software/CPU Normal quality without `gpu.tess` still uses the reference mesh and can look ringy; that is a separate path.
 - `shape: false` may leave slightly lower triangle quality on anisotropic flanks; shared boundary nodes stay unsplit.
 
+Live SolidCraft GUI confirmation (GPU Fine vs Normal/reference, half-pitch helix,
+entrance/exit, flanks, perf, triangle-budget notes): see `GUI_VERIFICATION.md`.
+
 ---
 
 ## Related files
