@@ -150,6 +150,13 @@ Temporary diagnostic tests were **reverted** after measurement; production sourc
 
 ---
 
+## Status
+
+**Option 1 landed:** permanent regressions
+`production_two_sequential_modeled_m5_holes_stay_curved` (engine) and
+`two_sequential_modeled_m5_path_a_stays_closed_curved` (kernel); Phase B / Phase 4B
+comments updated. Historical diagnostics in this folder retained.
+
 ## Approval request
 
 Please choose next step:

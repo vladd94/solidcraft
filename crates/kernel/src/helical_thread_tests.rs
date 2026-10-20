@@ -987,12 +987,198 @@ fn phase_b_precheck_single_hole_curved_trimmed_entry() {
     );
 }
 
-/// Phase B — four sequential modeled M5×0.8 through-holes on a 60×60×10 plate.
+/// Two sequential modeled M5×0.8 through-holes (kernel Path A = production Hole order:
+/// boolean Cut then `try_replace` per hole). Companion to the engine Hole-tool regression.
 ///
-/// Order (matches production Phase 4B): drill all plain tap holes first, then
-/// `try_replace` each cylinder sequentially. Cutting a new boolean hole into a body that
-/// already has meridional thread walls leaves stitch unable to close (open Regular shell);
-/// that cut-then-thread-per-hole path is recorded as blocked after one wire-match fix.
+/// Relies on the one bounded `validity()` inside each successful `try_replace` — does not
+/// re-invoke it. Free-edge / Closed-shell / plane∩helix entrance checks are structural.
+#[test]
+fn two_sequential_modeled_m5_path_a_stays_closed_curved() {
+    use truck_modeling::ShellCondition;
+
+    fn free_edge_count(b: &Body) -> usize {
+        let mut uses = std::collections::HashMap::new();
+        for f in b.solid.face_iter() {
+            for e in f.boundaries().iter().flat_map(|w| w.edge_iter()) {
+                *uses.entry(e.id()).or_insert(0usize) += 1;
+            }
+        }
+        uses.values().filter(|&&n| n == 1).count()
+    }
+    fn assert_closed_oriented(b: &Body) {
+        assert!(!b.is_surface(), "open shell");
+        assert_eq!(b.shell_count(), 1, "single shell");
+        assert!(
+            b.solid.boundaries().iter().all(|s| s.shell_condition() == ShellCondition::Closed),
+            "shell not Closed (free/non-manifold edges)"
+        );
+        assert_eq!(free_edge_count(b), 0, "free edges present");
+    }
+
+    let major = 5.0_f64;
+    let pitch = 0.8_f64;
+    assert!((pitch - 0.8).abs() < 1e-12 && (major - 5.0).abs() < 1e-12);
+    let tap = tap_radius(major, pitch);
+    let centers = [(15.0, 15.0), (45.0, 15.0)];
+    let mut body = box_solid(Vec3::ZERO, Vec3::new(60.0, 60.0, 10.0)).expect("stock");
+    let mut prev_flanks = 0usize;
+
+    for (i, &(x, y)) in centers.iter().enumerate() {
+        let hole = cylinder(Vec3::new(x, y, -1.0), Vec3::Z, tap, 12.0).expect("cyl");
+        body = boolean(&body, &hole, BoolOp::Cut).expect("boolean").expect("non-empty");
+        let on = Vec3::new(x, y + tap, 5.0);
+        body = try_replace_cylinder_with_helical_thread(&body, on, major, pitch)
+            .unwrap_or_else(|e| panic!("Hole{} try_replace: {e}", i + 1));
+        assert_closed_oriented(&body);
+        assert_curved_trimmed_thread(&body, Vec3::new(x, y, 0.0), tap, 0.0, 10.0, 2);
+        let flanks = count_surfaces(&body).3;
+        assert!(flanks >= 26 * (i + 1), "Hole{} flanks {flanks}", i + 1);
+        assert!(flanks >= prev_flanks, "Hole{} lost prior helical faces", i + 1);
+        prev_flanks = flanks;
+        for &(px, py) in centers.iter().take(i + 1) {
+            assert!(!body.contains(Vec3::new(px, py, 5.0)), "bore ({px},{py}) filled");
+            assert_curved_trimmed_thread(&body, Vec3::new(px, py, 0.0), tap, 0.0, 10.0, 2);
+        }
+        assert!(body.face_count() < 80, "not faceted: {}", body.face_count());
+    }
+
+    let step = step_export(&[&body], "two sequential Path A M5").expect("STEP");
+    assert!(step.contains("B_SPLINE_SURFACE"));
+    assert!(!step.contains("FACETED_BREP"));
+}
+
+/// Four sequential modeled M5×0.8 holes via Path A (boolean into already-threaded body),
+/// not the plain-first workaround. Times boolean / replace (incl. stitch+one validity) per hole.
+/// Stops on the first geometry failure or a `try_replace` validity budget (>90s) error; writes
+/// the last successful STEP under `/opt/cursor/artifacts/`.
+#[test]
+fn four_sequential_modeled_m5_path_a_timed() {
+    use std::time::{Duration, Instant};
+    use truck_modeling::ShellCondition;
+
+    const VALIDITY_NOTE: &str = "validity exceeded budget";
+
+    fn free_edge_count(b: &Body) -> usize {
+        let mut uses = std::collections::HashMap::new();
+        for f in b.solid.face_iter() {
+            for e in f.boundaries().iter().flat_map(|w| w.edge_iter()) {
+                *uses.entry(e.id()).or_insert(0usize) += 1;
+            }
+        }
+        uses.values().filter(|&&n| n == 1).count()
+    }
+
+    let major = 5.0_f64;
+    let pitch = 0.8_f64;
+    let tap = tap_radius(major, pitch);
+    let centers = [(15.0, 15.0), (45.0, 15.0), (15.0, 45.0), (45.0, 45.0)];
+    let mut body = box_solid(Vec3::ZERO, Vec3::new(60.0, 60.0, 10.0)).expect("stock");
+    let mut last_ok: Option<Body> = None;
+    let mut rows: Vec<(usize, f64, f64, usize, usize)> = Vec::new();
+    let mut report = String::from("# Four sequential modeled M5 Path A (timed)\n\n");
+    report.push_str("| hole | boolean_s | replace_s (sew/stitch/1×validity) | faces | flanks |\n|---|---|---|---|---|\n");
+
+    for (i, &(x, y)) in centers.iter().enumerate() {
+        let hole = cylinder(Vec3::new(x, y, -1.0), Vec3::Z, tap, 12.0).expect("cyl");
+        let t_bool = Instant::now();
+        let after_bool = match boolean(&body, &hole, BoolOp::Cut) {
+            Ok(Some(b)) => b,
+            Ok(None) => {
+                report.push_str(&format!("\n**STOP** Hole{i} boolean returned empty.\n"));
+                let _ = std::fs::create_dir_all("/opt/cursor/artifacts");
+                if let Some(prev) = &last_ok {
+                    let step = step_export(&[prev], "path_a_last_ok").unwrap_or_default();
+                    let _ = std::fs::write("/opt/cursor/artifacts/path_a_four_m5_last_ok.step", &step);
+                }
+                let _ = std::fs::write("/opt/cursor/artifacts/path_a_four_m5_timings.md", &report);
+                panic!("Hole{i} boolean empty; last_ok STEP preserved");
+            }
+            Err(e) => {
+                report.push_str(&format!("\n**STOP** Hole{i} boolean: {e}\n"));
+                let _ = std::fs::create_dir_all("/opt/cursor/artifacts");
+                if let Some(prev) = &last_ok {
+                    let step = step_export(&[prev], "path_a_last_ok").unwrap_or_default();
+                    let _ = std::fs::write("/opt/cursor/artifacts/path_a_four_m5_last_ok.step", &step);
+                }
+                let _ = std::fs::write("/opt/cursor/artifacts/path_a_four_m5_timings.md", &report);
+                panic!("Hole{i} boolean failed: {e}");
+            }
+        };
+        let boolean_s = t_bool.elapsed().as_secs_f64();
+        if t_bool.elapsed() > Duration::from_secs(90) {
+            report.push_str(&format!("\n**STOP** Hole{i} boolean exceeded 90s ({boolean_s:.3}s).\n"));
+            let _ = std::fs::write("/opt/cursor/artifacts/path_a_four_m5_timings.md", &report);
+            panic!("Hole{i} boolean budget");
+        }
+
+        let on = Vec3::new(x, y + tap, 5.0);
+        let t_rep = Instant::now();
+        let threaded = match try_replace_cylinder_with_helical_thread(&after_bool, on, major, pitch) {
+            Ok(b) => b,
+            Err(e) => {
+                let msg = e.to_string();
+                report.push_str(&format!("\n**STOP** Hole{i} try_replace after {boolean_s:.3}s boolean: {msg}\n"));
+                let _ = std::fs::create_dir_all("/opt/cursor/artifacts");
+                if let Some(prev) = &last_ok {
+                    let step = step_export(&[prev], "path_a_last_ok").unwrap_or_default();
+                    let _ = std::fs::write("/opt/cursor/artifacts/path_a_four_m5_last_ok.step", &step);
+                }
+                let _ = std::fs::write("/opt/cursor/artifacts/path_a_four_m5_timings.md", &report);
+                if msg.contains(VALIDITY_NOTE) {
+                    panic!("Hole{i} validity budget exceeded; last_ok STEP preserved");
+                }
+                panic!("Hole{i} try_replace failed: {msg}");
+            }
+        };
+        let replace_s = t_rep.elapsed().as_secs_f64();
+
+        // Structural only — validity already ran once inside try_replace.
+        assert!(!threaded.is_surface() && threaded.shell_count() == 1);
+        assert!(threaded.solid.boundaries().iter().all(|s| s.shell_condition() == ShellCondition::Closed));
+        assert_eq!(free_edge_count(&threaded), 0);
+        assert_curved_trimmed_thread(&threaded, Vec3::new(x, y, 0.0), tap, 0.0, 10.0, 2);
+        for &(px, py) in centers.iter().take(i + 1) {
+            assert!(!threaded.contains(Vec3::new(px, py, 5.0)), "bore ({px},{py}) filled after hole {i}");
+        }
+        if i > 0 {
+            let (px, py) = centers[0];
+            assert_curved_trimmed_thread(&threaded, Vec3::new(px, py, 0.0), tap, 0.0, 10.0, 2);
+        }
+        let flanks = count_surfaces(&threaded).3;
+        assert!(flanks >= 26 * (i + 1), "flanks {flanks} after hole {i}");
+        assert!(threaded.face_count() < 200, "faceted? faces={}", threaded.face_count());
+
+        report.push_str(&format!("| {i} | {boolean_s:.3} | {replace_s:.3} | {} | {flanks} |\n", threaded.face_count()));
+        rows.push((i, boolean_s, replace_s, threaded.face_count(), flanks));
+        eprintln!(
+            "path_a hole {i} @({x},{y}): boolean={boolean_s:.3}s replace={replace_s:.3}s faces={} flanks={flanks}",
+            threaded.face_count()
+        );
+        last_ok = Some(threaded.clone());
+        body = threaded;
+    }
+
+    let step = step_export(&[&body], "Path A 60x60 4xM5 sequential modeled").expect("STEP");
+    assert!(step.contains("B_SPLINE_SURFACE") && !step.contains("FACETED_BREP"));
+    let _ = std::fs::create_dir_all("/opt/cursor/artifacts");
+    std::fs::write("/opt/cursor/artifacts/path_a_four_m5_sequential.step", &step).expect("write STEP");
+    report.push_str(&format!("\nFinal faces={} STEP bytes={}\n", body.face_count(), step.len()));
+    for (i, b, r, f, fl) in &rows {
+        eprintln!("timing hole={i} boolean_s={b:.3} replace_s={r:.3} faces={f} flanks={fl}");
+    }
+    std::fs::write("/opt/cursor/artifacts/path_a_four_m5_timings.md", &report).expect("timings");
+    std::fs::create_dir_all("/workspace/tmp/sequential-hole2").ok();
+    std::fs::write("/workspace/tmp/sequential-hole2/path_a_four_m5_timings.md", &report).ok();
+}
+
+/// Phase B — four sequential M5×0.8 through-holes on a 60×60×10 plate.
+///
+/// Order (matches production Phase 4B plain-first): drill all plain tap holes first, then
+/// `try_replace` each cylinder sequentially. The cut-then-thread-per-hole (Path A) order is
+/// **not** inherently blocked on the current tip for two holes — see
+/// `two_sequential_modeled_m5_path_a_stays_closed_curved` and the engine Hole-tool regression.
+/// Historical diagnostics (`tmp/sequential-hole2/`) recorded Regular open-shell stitch failures
+/// after cutting into threaded walls; that failure is not reproducible for the two-hole case now.
 /// After each thread, structural checks confirm the new solid and that prior threads remain.
 #[test]
 fn phase_b_four_sequential_m5_modeled_through_holes() {
