@@ -815,6 +815,41 @@ fn loop_perimeter(edges: &[EdgeSpec]) -> f64 {
     })
 }
 
+/// Sample a truck wire for bore-rim matching without requiring a full EdgeSpec round-trip.
+/// Boolean hole rims are often two semicircle arcs; `wire_to_loop` can skip them when a curve
+/// conversion fails, which blocked the second sequential hole on an already-threaded plate.
+fn wire_matches_bore_rim(w: &mt::Wire, origin: Vec3, k: Vec3, r_min: f64, r_max: f64, tol: f64) -> bool {
+    let mut sum = Vec3::ZERO;
+    let mut n = 0.0;
+    let mut samples = 0usize;
+    for e in w.edge_iter() {
+        let abs = if e.orientation() { e.clone() } else { e.inverse() };
+        let c = abs.curve();
+        let (t0, t1) = c.range_tuple();
+        if !(t0.is_finite() && t1.is_finite()) {
+            return false;
+        }
+        for k_i in 0..=2 {
+            let t = t0 + (t1 - t0) * k_i as f64 / 2.0;
+            let p = from_p3(c.subs(t));
+            let along = (p - origin).dot(k);
+            let rad = ((p - origin) - k * along).len();
+            if rad < r_min - tol || rad > r_max + tol {
+                return false;
+            }
+            sum = sum + p;
+            n += 1.0;
+            samples += 1;
+        }
+    }
+    if samples < 3 || n <= 0.0 {
+        return false;
+    }
+    let centroid = sum * (1.0 / n);
+    let radial = ((centroid - origin) - k * (centroid - origin).dot(k)).len();
+    radial <= tol * 5.0
+}
+
 /// Replace one cylindrical hole wire on an existing planar face with a new entry loop, keeping
 /// every other wire as the original truck edges so stitch rematches prior thread walls.
 pub(crate) fn replace_bore_wire_on_face(
@@ -840,16 +875,26 @@ pub(crate) fn replace_bore_wire_on_face(
         .ok_or_else(|| KernelError::Failed("entry face has no wire".into()))?;
     let mut wires = face.absolute_boundaries().clone();
     let mut replaced = false;
+    let r_max = major_hint(old_r);
     for w in &mut wires {
-        let Ok(loop_e) = wire_to_loop(w) else { continue };
-        if loop_on_cylinder(&loop_e, origin, k, old_r, tol) || loop_near_hole(&loop_e, origin, k, old_r, major_hint(old_r), tol) {
-            let c = loop_centroid(&loop_e);
-            let radial = ((c - origin) - k * (c - origin).dot(k)).len();
-            if radial <= tol * 5.0 {
-                *w = entry_wire.clone();
-                replaced = true;
-                break;
-            }
+        // Prefer direct truck sampling (handles 2-arc boolean rims). Fall back to EdgeSpec path.
+        let hit = wire_matches_bore_rim(w, origin, k, old_r, old_r, tol)
+            || wire_matches_bore_rim(w, origin, k, old_r, r_max, tol)
+            || wire_to_loop(w).ok().is_some_and(|loop_e| {
+                if loop_on_cylinder(&loop_e, origin, k, old_r, tol)
+                    || loop_near_hole(&loop_e, origin, k, old_r, r_max, tol)
+                {
+                    let c = loop_centroid(&loop_e);
+                    let radial = ((c - origin) - k * (c - origin).dot(k)).len();
+                    radial <= tol * 5.0
+                } else {
+                    false
+                }
+            });
+        if hit {
+            *w = entry_wire.clone();
+            replaced = true;
+            break;
         }
     }
     if !replaced {

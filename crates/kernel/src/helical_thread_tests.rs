@@ -996,3 +996,4 @@ fn phase_b_four_sequential_m5_modeled_through_holes() {
     ));
     std::fs::write("/opt/cursor/artifacts/phase_b_timings.md", report).ok();
 }
+
