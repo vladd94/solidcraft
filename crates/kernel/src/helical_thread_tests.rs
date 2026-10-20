@@ -1223,7 +1223,7 @@ fn m5_export_plan_succeeds_with_shape_fallback() {
     assert!(shared > 20, "shared edges present: {shared}");
     assert_eq!(plan.edges.len(), plan.edge_faces.len());
 
-    // Helical crest signature (not rings): L-R peak offset ≈ pitch/2.
+    // Helical crest edges on the plan mesh: pitch ≈ 0.8 (rings would have Δz ≈ 0 while winding).
     let crest_r = (0..body.face_count())
         .filter_map(|i| match face_surface(&body, i) {
             Some(FaceSurface::Cylinder { radius, .. }) => Some(radius),
@@ -1241,57 +1241,57 @@ fn m5_export_plan_succeeds_with_shape_fallback() {
     let u0 = if k.cross(Vec3::X).len() > 0.2 { Vec3::X } else { Vec3::Z };
     let u = (u0 - k * u0.dot(k)).normalized().unwrap_or(Vec3::X);
     let v = k.cross(u);
-    let mut left = Vec::new();
-    let mut right = Vec::new();
-    for p in &mesh.positions {
-        let w = *p - origin;
-        let z = w.dot(k);
-        let rad = w - k * z;
-        let r = rad.len();
-        if !(crest_r - 0.05..crest_r + 0.08).contains(&r) {
-            continue;
-        }
-        if rad.dot(v).abs() > 0.35 {
-            continue;
-        }
-        if rad.dot(u) < -0.05 {
-            left.push((z, r));
-        } else if rad.dot(u) > 0.05 {
-            right.push((z, r));
-        }
-    }
-    let peaks = |pts: &[(f64, f64)]| -> Vec<f64> {
-        let mut bins = vec![f64::INFINITY; 400];
-        for (z, r) in pts {
-            let i = ((*z + 20.0) * 20.0).floor() as isize;
-            if (0..400).contains(&i) {
-                bins[i as usize] = bins[i as usize].min(*r);
-            }
-        }
-        let mut pk = Vec::new();
-        for i in 1..399 {
-            if bins[i].is_finite() && bins[i] < bins[i - 1] && bins[i] < bins[i + 1] {
-                pk.push(i as f64 / 20.0 - 20.0);
-            }
-        }
-        pk
+    let ang = |p: Vec3| {
+        let w = p - origin;
+        let rad = w - k * w.dot(k);
+        rad.dot(v).atan2(rad.dot(u))
     };
-    let lp = peaks(&left);
-    let rp = peaks(&right);
-    let mut half = 0usize;
-    let mut aligned = 0usize;
-    for lz in &lp {
-        let best = rp.iter().map(|rz| (rz - lz).abs()).fold(f64::INFINITY, f64::min);
-        if best < 0.15 {
-            aligned += 1;
-        } else if (best - 0.4).abs() < 0.15 {
-            half += 1;
+    let rad_of = |p: Vec3| {
+        let w = p - origin;
+        (w - k * w.dot(k)).len()
+    };
+    let mut helical = 0usize;
+    let mut flat = 0usize;
+    let mut pitch_err = 0.0_f64;
+    for e in &mesh.edges {
+        if e.len() < 8 {
+            continue;
+        }
+        let a = e[0];
+        let b = *e.last().unwrap();
+        if !((crest_r - 0.08)..(crest_r + 0.08)).contains(&rad_of(a)) || !((crest_r - 0.08)..(crest_r + 0.08)).contains(&rad_of(b)) {
+            continue;
+        }
+        let mut th = 0.0;
+        let mut prev = ang(a);
+        for p in e.iter().skip(1) {
+            let t = ang(*p);
+            let mut d = t - prev;
+            while d > std::f64::consts::PI {
+                d -= std::f64::consts::TAU;
+            }
+            while d < -std::f64::consts::PI {
+                d += std::f64::consts::TAU;
+            }
+            th += d;
+            prev = t;
+        }
+        let dz = (b - origin).dot(k) - (a - origin).dot(k);
+        if th.abs() > 0.5 {
+            let pitch = dz.abs() / (th.abs() / std::f64::consts::TAU);
+            if (pitch - 0.8).abs() < 0.15 {
+                helical += 1;
+                pitch_err = pitch_err.max((pitch - 0.8).abs());
+            } else if dz.abs() < 0.15 {
+                flat += 1;
+            }
         }
     }
-    eprintln!("L-R crest peaks left={} right={} half={} aligned={}", lp.len(), rp.len(), half, aligned);
-    assert!(half > aligned, "plan mesh must look helical (half-pitch L-R), not rings");
+    eprintln!("plan-mesh crest edges: helical≈0.8={helical} flat={flat} max|pitch-0.8|={pitch_err:.3e}");
+    assert!(helical > 0, "plan mesh must carry helical crest edges at pitch 0.8");
+    assert!(helical > flat, "plan mesh must not be dominated by flat ring edges");
 
-    // Body::tessellate must take the plan path (same triangle count class, not truck rings).
+    // Body::tessellate must take the plan path (same triangle count, not Truck fallback).
     let display = body.tessellate(2e-3).expect("tessellate");
     assert_eq!(display.triangles.len(), mesh.triangles.len(), "tessellate uses plan, not Truck fallback");
 
