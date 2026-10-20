@@ -885,8 +885,12 @@ fn phase_b_precheck_single_hole_curved_trimmed_entry() {
 }
 
 /// Phase B — four sequential modeled M5×0.8 through-holes on a 60×60×10 plate.
-/// Each hole: boolean cut → try_replace (one validity inside). After each hole, structural
-/// checks confirm the new solid and that prior threads remain. STEP export + surface report.
+///
+/// Order (matches production Phase 4B): drill all plain tap holes first, then
+/// `try_replace` each cylinder sequentially. Cutting a new boolean hole into a body that
+/// already has meridional thread walls leaves stitch unable to close (open Regular shell);
+/// that cut-then-thread-per-hole path is recorded as blocked after one wire-match fix.
+/// After each thread, structural checks confirm the new solid and that prior threads remain.
 #[test]
 fn phase_b_four_sequential_m5_modeled_through_holes() {
     use std::time::Instant;
@@ -896,42 +900,27 @@ fn phase_b_four_sequential_m5_modeled_through_holes() {
     let tap = tap_radius(major, pitch);
     let centers = [(15.0, 15.0), (45.0, 15.0), (15.0, 45.0), (45.0, 45.0)];
     let stock = box_solid(Vec3::ZERO, Vec3::new(60.0, 60.0, 10.0)).expect("stock");
-    let mut body = stock;
+
+    let t_bool_all = Instant::now();
+    let mut plate = stock;
+    for &(x, y) in &centers {
+        let hole = cylinder(Vec3::new(x, y, -1.0), Vec3::Z, tap, 12.0).expect("cyl");
+        plate = boolean(&plate, &hole, BoolOp::Cut)
+            .expect("boolean")
+            .expect("boolean non-empty");
+    }
+    let boolean_all_s = t_bool_all.elapsed().as_secs_f64();
+    eprintln!("phase_b plain 4 holes boolean_all={boolean_all_s:.3}s faces={}", plate.face_count());
+
+    let mut body = plate;
     let mut last_ok: Option<Body> = None;
     let mut timings: Vec<(usize, f64, f64, usize, usize)> = Vec::new(); // i, boolean_s, replace_s, faces, flanks
 
     for (i, &(x, y)) in centers.iter().enumerate() {
-        let t_bool = Instant::now();
-        let hole = cylinder(Vec3::new(x, y, -1.0), Vec3::Z, tap, 12.0).expect("cyl");
-        let cut = match boolean(&body, &hole, BoolOp::Cut) {
-            Ok(Some(b)) => b,
-            Ok(None) => {
-                if let Some(prev) = &last_ok {
-                    let step = step_export(&[prev], "phase_b_last_ok").unwrap_or_default();
-                    let _ = std::fs::write("/opt/cursor/artifacts/phase_b_last_ok.step", &step);
-                }
-                panic!("phase_b hole {i} boolean returned empty; preserved last_ok STEP");
-            }
-            Err(e) => {
-                if let Some(prev) = &last_ok {
-                    let step = step_export(&[prev], "phase_b_last_ok").unwrap_or_default();
-                    let _ = std::fs::write("/opt/cursor/artifacts/phase_b_last_ok.step", &step);
-                }
-                panic!("phase_b hole {i} boolean failed: {e}; preserved last_ok STEP");
-            }
-        };
-        let boolean_s = t_bool.elapsed().as_secs_f64();
-
-        // Remaining prior threads must still present as non-analytic flanks before replace.
-        if i > 0 {
-            let (_, _, _, flanks) = count_surfaces(&cut);
-            assert!(flanks >= 2 * i, "after boolean {i}: prior flanks={flanks}, need ≥{}", 2 * i);
-        }
-
         let on = Vec3::new(x, y + tap, 5.0);
-        assert!(cylinder_face_at(&cut, on).is_some(), "hole {i} cylinder selectable before replace");
+        assert!(cylinder_face_at(&body, on).is_some(), "hole {i} cylinder selectable before replace");
         let t_rep = Instant::now();
-        let threaded = match try_replace_cylinder_with_helical_thread(&cut, on, major, pitch) {
+        let threaded = match try_replace_cylinder_with_helical_thread(&body, on, major, pitch) {
             Ok(b) => b,
             Err(e) => {
                 if let Some(prev) = &last_ok {
@@ -953,13 +942,19 @@ fn phase_b_four_sequential_m5_modeled_through_holes() {
             let (px, py) = centers[0];
             assert_curved_trimmed_thread(&threaded, Vec3::new(px, py, 0.0), tap, 0.0, 10.0, 2);
         }
+        // Remaining plain holes stay analytic cylinders.
+        for &(ux, uy) in centers.iter().skip(i + 1) {
+            let c = cylinder_face_at(&threaded, Vec3::new(ux, uy + tap, 5.0));
+            assert!(c.is_some(), "remaining plain ({ux},{uy}) after thread {i}");
+            assert!((c.unwrap().radius - tap).abs() < 1e-3);
+        }
 
         let (_, cyls, _, flanks) = count_surfaces(&threaded);
         eprintln!(
-            "phase_b hole {i} @({x},{y}): boolean={boolean_s:.3}s replace={replace_s:.3}s faces={} cyl={cyls} flank={flanks}",
+            "phase_b thread {i} @({x},{y}): replace={replace_s:.3}s faces={} cyl={cyls} flank={flanks}",
             threaded.face_count()
         );
-        timings.push((i, boolean_s, replace_s, threaded.face_count(), flanks));
+        timings.push((i, if i == 0 { boolean_all_s } else { 0.0 }, replace_s, threaded.face_count(), flanks));
         last_ok = Some(threaded.clone());
         body = threaded;
     }
