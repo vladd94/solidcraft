@@ -1,0 +1,104 @@
+   Compiling solidcraft-kernel v0.16.2 (/workspace/crates/kernel)
+    Finished `test` profile [optimized + debuginfo] target(s) in 1m 29s
+     Running unittests src/lib.rs (target/debug/deps/solidcraft_kernel-d565376b3e4b5d63)
+
+running 1 test
+=== EXPORT AUDIT (STEP reimport) ===
+import 240.757596ms
+faces=34 shells=1 surface=false validity_empty=true (n_issues=0)
+face  0: Plane      edges=4 ori=true r=None
+face  1: Plane      edges=4 ori=true r=None
+face  2: Plane      edges=4 ori=true r=None
+face  3: Plane      edges=4 ori=true r=None
+face  4: Cylinder   edges=28 ori=true r=Some(2.100000000000006)
+face  5: BSpline    edges=4 ori=true r=None
+face  6: BSpline    edges=4 ori=true r=None
+face  7: BSpline    edges=4 ori=true r=None
+face  8: BSpline    edges=4 ori=true r=None
+face  9: BSpline    edges=4 ori=true r=None
+face 10: BSpline    edges=4 ori=true r=None
+face 11: BSpline    edges=4 ori=true r=None
+face 12: BSpline    edges=4 ori=true r=None
+face 13: BSpline    edges=4 ori=true r=None
+face 14: BSpline    edges=4 ori=true r=None
+face 15: BSpline    edges=4 ori=true r=None
+face 16: BSpline    edges=4 ori=true r=None
+face 17: BSpline    edges=4 ori=true r=None
+face 18: BSpline    edges=4 ori=true r=None
+face 19: BSpline    edges=4 ori=true r=None
+face 20: BSpline    edges=4 ori=true r=None
+face 21: BSpline    edges=4 ori=true r=None
+face 22: BSpline    edges=4 ori=true r=None
+face 23: BSpline    edges=4 ori=true r=None
+face 24: BSpline    edges=4 ori=true r=None
+face 25: BSpline    edges=4 ori=true r=None
+face 26: BSpline    edges=4 ori=true r=None
+face 27: BSpline    edges=4 ori=true r=None
+face 28: BSpline    edges=4 ori=true r=None
+face 29: BSpline    edges=4 ori=true r=None
+face 30: BSpline    edges=4 ori=true r=None
+face 31: Cylinder   edges=28 ori=true r=Some(2.5000000000000027)
+face 32: Plane      edges=8 ori=true r=None
+face 33: Plane      edges=8 ori=true r=None
+face kinds: {"BSpline": 26, "Cylinder": 2, "Plane": 6}
+BSpline–BSpline shared edges: 24
+seam 27-28: max|Δpos|=9.984e-3 mm  min n·n'=1.000000  min |t_proj·t_proj'|=1.000000
+seam 11-12: max|Δpos|=9.984e-3 mm  min n·n'=1.000000  min |t_proj·t_proj'|=1.000000
+seam 9-10: max|Δpos|=9.984e-3 mm  min n·n'=1.000000  min |t_proj·t_proj'|=1.000000
+seam 15-16: max|Δpos|=9.984e-3 mm  min n·n'=1.000000  min |t_proj·t_proj'|=1.000000
+seam 20-21: max|Δpos|=9.984e-3 mm  min n·n'=1.000000  min |t_proj·t_proj'|=1.000000
+seam 7-8: max|Δpos|=9.984e-3 mm  min n·n'=1.000000  min |t_proj·t_proj'|=1.000000
+seam 19-20: max|Δpos|=9.984e-3 mm  min n·n'=1.000000  min |t_proj·t_proj'|=1.000000
+seam 6-7: max|Δpos|=9.984e-3 mm  min n·n'=1.000000  min |t_proj·t_proj'|=1.000000
+seam 10-11: max|Δpos|=9.984e-3 mm  min n·n'=1.000000  min |t_proj·t_proj'|=1.000000
+seam 25-26: max|Δpos|=9.984e-3 mm  min n·n'=1.000000  min |t_proj·t_proj'|=1.000000
+seam 29-30: max|Δpos|=9.984e-3 mm  min n·n'=1.000000  min |t_proj·t_proj'|=1.000000
+seam 13-14: max|Δpos|=9.984e-3 mm  min n·n'=1.000000  min |t_proj·t_proj'|=1.000000
+seam 22-23: max|Δpos|=9.984e-3 mm  min n·n'=1.000000  min |t_proj·t_proj'|=1.000000
+seam 21-22: max|Δpos|=9.984e-3 mm  min n·n'=1.000000  min |t_proj·t_proj'|=1.000000
+seam 5-6: max|Δpos|=9.984e-3 mm  min n·n'=1.000000  min |t_proj·t_proj'|=1.000000
+seam 18-19: max|Δpos|=9.984e-3 mm  min n·n'=1.000000  min |t_proj·t_proj'|=1.000000
+seam 23-24: max|Δpos|=9.984e-3 mm  min n·n'=1.000000  min |t_proj·t_proj'|=1.000000
+seam 16-17: max|Δpos|=9.984e-3 mm  min n·n'=1.000000  min |t_proj·t_proj'|=1.000000
+seam 12-13: max|Δpos|=9.984e-3 mm  min n·n'=1.000000  min |t_proj·t_proj'|=1.000000
+seam 28-29: max|Δpos|=9.984e-3 mm  min n·n'=1.000000  min |t_proj·t_proj'|=1.000000
+seam 14-15: max|Δpos|=9.984e-3 mm  min n·n'=1.000000  min |t_proj·t_proj'|=1.000000
+seam 8-9: max|Δpos|=9.984e-3 mm  min n·n'=1.000000  min |t_proj·t_proj'|=1.000000
+seam 24-25: max|Δpos|=9.984e-3 mm  min n·n'=1.000000  min |t_proj·t_proj'|=1.000000
+seam 26-27: max|Δpos|=9.984e-3 mm  min n·n'=1.000000  min |t_proj·t_proj'|=1.000000
+SEAMS summary: max_pos=9.984e-3 worst_n·n'=1.000000 worst_|t·t'|=1.000000
+pitch edge cyl=4 r=2.1000 dθ=-6.042 dz=-0.7692 pitch_est=0.800000
+pitch edge cyl=4 r=2.1000 dθ=-6.042 dz=-0.7692 pitch_est=0.800000
+pitch edge cyl=4 r=2.1000 dθ=-6.042 dz=-0.7692 pitch_est=0.800000
+pitch edge cyl=4 r=2.1000 dθ=6.042 dz=0.7692 pitch_est=0.800000
+pitch edge cyl=4 r=2.1000 dθ=-6.042 dz=-0.7692 pitch_est=0.800000
+pitch edge cyl=4 r=2.1000 dθ=-6.042 dz=-0.7692 pitch_est=0.800000
+pitch edge cyl=31 r=2.5000 dθ=6.042 dz=0.7692 pitch_est=0.800000
+pitch edge cyl=4 r=2.1000 dθ=-6.042 dz=-0.7692 pitch_est=0.800000
+pitch edge cyl=4 r=2.1000 dθ=-6.042 dz=-0.7692 pitch_est=0.800000
+pitch edge cyl=31 r=2.5000 dθ=6.042 dz=0.7692 pitch_est=0.800000
+pitch edge cyl=31 r=2.5000 dθ=6.042 dz=0.7692 pitch_est=0.800000
+pitch edge cyl=31 r=2.5000 dθ=-6.042 dz=-0.7692 pitch_est=0.800000
+pitch edge cyl=31 r=2.5000 dθ=6.042 dz=0.7692 pitch_est=0.800000
+pitch edge cyl=31 r=2.5000 dθ=-6.042 dz=-0.7692 pitch_est=0.800000
+pitch edge cyl=4 r=2.1000 dθ=6.042 dz=0.7692 pitch_est=0.800000
+pitch edge cyl=31 r=2.5000 dθ=6.042 dz=0.7692 pitch_est=0.800000
+pitch vs 0.8 mm: mean=0.800000 max|err|=2.109e-15 n=52
+plane face 32: n_shared_bsp_edges=2 max_off_plane=1.776e-15 max_off_parent=8.893e-3 min_r=2.1000
+plane face 33: n_shared_bsp_edges=2 max_off_plane=8.882e-15 max_off_parent=8.893e-3 min_r=2.1000
+cylinders: crest_r=2.100000 root_r=2.500000 Δr=0.400000  ISO 5/8H=0.433013 (H=0.692820)
+tess::plan FAIL 1.501631153s: the operation failed: not supported yet: tessellation: face 8: boundary crosses itself
+why many faces: wall specs faces=28 (=2 crest/root + 2*13 flanks) in 696.63µs
+native M5 plate sew 10.737408964s faces=35
+native plan FAIL 1.478709079s: the operation failed: not supported yet: tessellation: face 10: boundary crosses itself
+turns_more_than_once(export)=true
+Body::tessellate 3.919461984s
+tess tris=39743 (== plan path if turns_more_than_once)
+viewport root cause: tess::plan fails → Body::tessellate uses Truck mesh_shells fallback (rings). face_id from error=8 (BSpline flank).
+seam Δpos≈10µm is plane∩ / ruled-surface approximation residual, not a topological gap; n·n'=1 implies matching oriented normals.
+L-R crest peaks left=10 right=10 offsets≈p/2:0 aligned:9 (pitch/2=0.4)
+=== END AUDIT ===
+test helical_thread_tests::audit_exported_per_turn_m5_step ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 836 filtered out; finished in 31.92s
+
