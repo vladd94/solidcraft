@@ -52,10 +52,20 @@ struct Piece {
     pts: Vec<Vec3>,
 }
 
+/// Result of [`cut`]: closed loops in one period, and whether the face wound against the usual
+/// left-of-boundary sense (internal hole walls). Callers that triangulate may need to flip
+/// triangle winding when `inverted` is set so signed volume matches the solid.
+#[derive(Clone, Debug)]
+pub(crate) struct CutLoops {
+    pub loops: Vec<Loop>,
+    pub inverted: bool,
+}
+
 /// Cut a face whose loops wind around direction `d` (period `per`) into one period. The face
-/// lies left of its loops in (u, v). `None` when the loops cannot be cut cleanly (the face would
-/// be unbounded along the line, or the two lines disagree); the caller then fails as before.
-pub(crate) fn cut(s: &EvalSurface, loops: &[Loop], d: usize, per: f64, rules: &Rules, h: f64) -> Option<Vec<Loop>> {
+/// lies left of its loops in (u, v). Internal hole walls may wind the other way; those
+/// (below, above) crossing pairs are linked left-up / right-down. `None` when the loops cannot
+/// be cut cleanly (the face would be unbounded along the line, or the two lines disagree).
+pub(crate) fn cut(s: &EvalSurface, loops: &[Loop], d: usize, per: f64, rules: &Rules, h: f64) -> Option<CutLoops> {
     if !(per > 0.0 && per.is_finite()) || loops.is_empty() {
         return None;
     }
@@ -184,32 +194,58 @@ pub(crate) fn cut(s: &EvalSurface, loops: &[Loop], d: usize, per: f64, rules: &R
             *pt = c.p;
         }
     }
-    // Inside the face along each line: from a crossing with the face above to the next one
-    // up (which must have it below).
+    // Inside the face along each line. Face-left windings give (above, below) pairs and link
+    // left-down / right-up. Internal hole walls wind the other way: (below, above) pairs and
+    // left-up / right-down (#1289).
+    let inverted = match (left.first(), left.get(1)) {
+        (Some(a), Some(b)) => !a.0.above && b.0.above,
+        _ => false,
+    };
+    for pair in left.chunks(2) {
+        let (Some(a), Some(b)) = (pair.first(), pair.get(1)) else {
+            return None;
+        };
+        let ok = if inverted { !a.0.above && b.0.above } else { a.0.above && !b.0.above };
+        if !ok {
+            return None;
+        }
+    }
     let mut links: Vec<(usize, Vec<[f64; 2]>, Vec<Vec3>, usize)> = Vec::new();
     for pair in left.chunks(2).zip(right.chunks(2)) {
         let (lp, rp) = pair;
         let (Some(la), Some(lb), Some(ra), Some(rb)) = (lp.first(), lp.get(1), rp.first(), rp.get(1)) else { return None };
-        if !(la.0.above && !lb.0.above) {
-            return None;
-        }
-        // Nodes strictly between, made once for both lines.
         let inner = seam_nodes(s, swap, x0, la.0.y, lb.0.y, rules, h)?;
-        // Left line, downwards: from the piece leaving at the top to the one entering at the bottom.
-        let (top_leave, bottom_enter) = (lb.1, la.1);
-        let down_uv: Vec<[f64; 2]> = inner.iter().rev().map(|(y, _)| [x0, *y]).collect();
-        let down_pts: Vec<Vec3> = inner.iter().rev().map(|(_, p)| *p).collect();
-        if lb.2 || !la.2 {
-            return None;
+        if inverted {
+            // Left upwards: leave at the bottom → enter at the top.
+            if la.2 || !lb.2 {
+                return None;
+            }
+            let up_uv: Vec<[f64; 2]> = inner.iter().map(|(y, _)| [x0, *y]).collect();
+            let up_pts: Vec<Vec3> = inner.iter().map(|(_, p)| *p).collect();
+            links.push((la.1, up_uv, up_pts, lb.1));
+            // Right downwards: leave at the top → enter at the bottom.
+            if rb.2 || !ra.2 {
+                return None;
+            }
+            let down_uv: Vec<[f64; 2]> = inner.iter().rev().map(|(y, _)| [x1, *y]).collect();
+            let down_pts: Vec<Vec3> = inner.iter().rev().map(|(_, p)| *p).collect();
+            links.push((rb.1, down_uv, down_pts, ra.1));
+        } else {
+            // Left downwards: leave at the top → enter at the bottom.
+            if lb.2 || !la.2 {
+                return None;
+            }
+            let down_uv: Vec<[f64; 2]> = inner.iter().rev().map(|(y, _)| [x0, *y]).collect();
+            let down_pts: Vec<Vec3> = inner.iter().rev().map(|(_, p)| *p).collect();
+            links.push((lb.1, down_uv, down_pts, la.1));
+            // Right upwards: leave at the bottom → enter at the top.
+            if ra.2 || !rb.2 {
+                return None;
+            }
+            let up_uv: Vec<[f64; 2]> = inner.iter().map(|(y, _)| [x1, *y]).collect();
+            let up_pts: Vec<Vec3> = inner.iter().map(|(_, p)| *p).collect();
+            links.push((ra.1, up_uv, up_pts, rb.1));
         }
-        links.push((top_leave, down_uv, down_pts, bottom_enter));
-        // Right line, upwards: from the piece leaving at the bottom to the one entering at the top.
-        if ra.2 || !rb.2 {
-            return None;
-        }
-        let up_uv: Vec<[f64; 2]> = inner.iter().map(|(y, _)| [x1, *y]).collect();
-        let up_pts: Vec<Vec3> = inner.iter().map(|(_, p)| *p).collect();
-        links.push((ra.1, up_uv, up_pts, rb.1));
     }
     // Chain pieces through the links into closed loops.
     let mut next: Vec<Option<usize>> = vec![None; pieces.len()];
@@ -270,7 +306,26 @@ pub(crate) fn cut(s: &EvalSurface, loops: &[Loop], d: usize, per: f64, rules: &R
                 .sum::<f64>()
         })
         .sum();
-    (area > 0.0).then_some(out)
+    // Inverted (face-right) windings can leave a negative signed area; reverse those loops so
+    // downstream triangulation sees face-left boundaries. Report `inverted` so the caller can
+    // flip triangle winding for a consistent solid volume.
+    if area == 0.0 {
+        None
+    } else if area > 0.0 {
+        Some(CutLoops { loops: out, inverted })
+    } else {
+        Some(CutLoops {
+            inverted: true,
+            loops: out
+                .into_iter()
+                .map(|mut l| {
+                    l.uv.reverse();
+                    l.pts.reverse();
+                    l
+                })
+                .collect(),
+        })
+    }
 }
 
 /// Where to cut: the middle of the widest gap between the loops' nodes around the period, as

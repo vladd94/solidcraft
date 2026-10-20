@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use mt::{BoundedCurve, InnerSpace, MetricSpace, ParametricCurve, ParametricSurface3D, SearchNearestParameter};
-use solidcraft_geom::{Plane, Region2, Seg2, Vec2, Vec3};
+use solidcraft_geom::{Plane, Region2, Seg2, UnitVec3, Vec2, Vec3};
 use truck_modeling as mt;
 
 use crate::body::{Body, from_p3, p3};
@@ -42,13 +42,14 @@ fn surface_of(shell: mt::Shell) -> Body {
         face_sources: None,
         history: None,
         display_of: None,
+        meshes: None,
         regularization_protected: false,
     }
 }
 
 /// A body from faces: a solid when they close, else a surface; with the history of the
 /// operation that made the faces from `operands` as `rec` records.
-fn body_of(faces: Vec<mt::Face>, operands: &[&mt::Solid], rec: &Rebuild) -> Result<Body> {
+pub(crate) fn body_of(faces: Vec<mt::Face>, operands: &[&mt::Solid], rec: &Rebuild) -> Result<Body> {
     let shell = mt::Shell::from(faces);
     if shell.shell_condition() == mt::ShellCondition::Closed {
         crate::record::rebuilt(mt::Solid::new_unchecked(vec![shell]), operands, rec)
@@ -595,6 +596,16 @@ pub(crate) fn nearest_face(body: &Body, p: Vec3) -> Result<usize> {
 /// faces close up. Faces are turned so that neighbours agree. The result's history is over
 /// `bodies`: each face the one it was sewn from, each edge the edges sewn into it.
 pub fn stitch(bodies: &[&Body], tol: f64) -> Result<Body> {
+    stitch_inner(bodies, tol, None)
+}
+
+/// Stitch with optional stage diagnostics and a hard deadline (investigation / hang diagnosis).
+/// When `deadline` elapses, returns `Failed("stitch timed out at <stage>")` without hanging.
+pub fn stitch_deadline(bodies: &[&Body], tol: f64, deadline: std::time::Instant) -> Result<Body> {
+    stitch_inner(bodies, tol, Some(deadline))
+}
+
+fn stitch_inner(bodies: &[&Body], tol: f64, deadline: Option<std::time::Instant>) -> Result<Body> {
     if bodies.is_empty() {
         return Err(KernelError::Invalid("nothing to stitch".into()));
     }
@@ -603,16 +614,35 @@ pub fn stitch(bodies: &[&Body], tol: f64) -> Result<Body> {
     }
     let size = bodies.iter().map(|b| b.size()).fold(0.0, f64::max);
     let tol = if tol.is_finite() && tol > 0.0 { tol } else { size * 1e-6 + 1e-6 };
+    let diag = deadline.is_some() || std::env::var_os("SOLIDCRAFT_STITCH_DIAG").is_some();
+    let t0 = std::time::Instant::now();
+    let check = |stage: &str| -> Result<()> {
+        if diag {
+            eprintln!("stitch[{stage}] elapsed={:?} faces_so_far", t0.elapsed());
+        }
+        if let Some(dl) = deadline {
+            if std::time::Instant::now() >= dl {
+                return Err(KernelError::Failed(format!("stitch timed out at {stage} after {:?}", t0.elapsed())));
+            }
+        }
+        Ok(())
+    };
     guard("stitch", || {
+        check("start")?;
         let faces: Vec<mt::Face> = bodies.iter().flat_map(|b| b.solid.face_iter().cloned().collect::<Vec<_>>()).collect();
+        if diag {
+            eprintln!("stitch[start] input_faces={} tol={tol:.3e}", faces.len());
+        }
         // Shared vertices by position, shared edges by their ends and middle.
         let mut verts: Vec<mt::Vertex> = Vec::new();
         let mut vmap: HashMap<mt::VertexID, mt::Vertex> = HashMap::new();
-        let mut canon = |v: &mt::Vertex, verts: &mut Vec<mt::Vertex>| -> mt::Vertex {
+        let mut canon_scans = 0usize;
+        let mut canon = |v: &mt::Vertex, verts: &mut Vec<mt::Vertex>, scans: &mut usize| -> mt::Vertex {
             if let Some(c) = vmap.get(&v.id()) {
                 return c.clone();
             }
             let p = v.point();
+            *scans += verts.len();
             let c = match verts.iter().find(|u| u.point().distance(p) <= tol) {
                 Some(u) => u.clone(),
                 None => {
@@ -626,16 +656,21 @@ pub fn stitch(bodies: &[&Body], tol: f64) -> Result<Body> {
         let mut edges: Vec<(mt::Edge, mt::Point3)> = Vec::new();
         let mut out = Vec::with_capacity(faces.len());
         let mut rec = Rebuild::default();
-        for f in &faces {
+        let mut edge_lookups = 0usize;
+        for (fi, f) in faces.iter().enumerate() {
+            if fi % 8 == 0 {
+                check(&format!("canon_faces:{fi}/{}", faces.len()))?;
+            }
             let mut wires = Vec::new();
             for w in f.absolute_boundaries() {
                 let mut nw = Vec::new();
                 for e in w.edge_iter() {
                     let abs = if e.orientation() { e.clone() } else { e.inverse() };
-                    let (a, b) = (canon(abs.front(), &mut verts), canon(abs.back(), &mut verts));
+                    let (a, b) = (canon(abs.front(), &mut verts, &mut canon_scans), canon(abs.back(), &mut verts, &mut canon_scans));
                     let c = abs.curve();
-                    let (t0, t1) = c.range_tuple();
-                    let mid = c.subs(0.5 * (t0 + t1));
+                    let (t0p, t1p) = c.range_tuple();
+                    let mid = c.subs(0.5 * (t0p + t1p));
+                    edge_lookups += edges.len();
                     let found = edges.iter().find_map(|(x, m)| {
                         if m.distance(mid) > tol * 10.0 {
                             return None;
@@ -668,6 +703,17 @@ pub fn stitch(bodies: &[&Body], tol: f64) -> Result<Body> {
             rec.whole(&nf, f);
             out.push(nf);
         }
+        if diag {
+            eprintln!(
+                "stitch[canon_done] verts={} edges={} canon_scans≈{} edge_lookups≈{} {:?}",
+                verts.len(),
+                edges.len(),
+                canon_scans,
+                edge_lookups,
+                t0.elapsed()
+            );
+        }
+        check("orient_propagate")?;
         // Neighbours run their shared edges opposite ways.
         let mut uses: HashMap<mt::EdgeID, Vec<(usize, bool)>> = HashMap::new();
         for (i, f) in out.iter().enumerate() {
@@ -696,9 +742,15 @@ pub fn stitch(bodies: &[&Body], tol: f64) -> Result<Body> {
                 }
             }
         }
+        check("body_of")?;
         let out: Vec<mt::Face> = out.into_iter().zip(flip).map(|(f, fl)| if fl == Some(true) { f.inverse() } else { f }).collect();
         let operands: Vec<&mt::Solid> = bodies.iter().map(|b| &*b.solid).collect();
-        body_of(out, &operands, &rec)
+        let body = body_of(out, &operands, &rec)?;
+        check("done")?;
+        if diag {
+            eprintln!("stitch[done] {:?}", t0.elapsed());
+        }
+        Ok(body)
     })
 }
 
@@ -706,7 +758,7 @@ pub fn stitch(bodies: &[&Body], tol: f64) -> Result<Body> {
 #[derive(Clone, Copy)]
 pub(crate) enum Offset {
     Plane { n: Vec3 },
-    Cylinder { o: Vec3, axis: Vec3, r: f64, out: f64 },
+    Cylinder { o: Vec3, axis: UnitVec3, r: f64, out: f64 },
 }
 
 impl Offset {
@@ -1098,31 +1150,6 @@ pub fn thicken(body: &Body, thickness: f64, symmetric: bool) -> Result<Body> {
     })
 }
 
-/// A surface body trimmed by a tool: its faces are cut where the tool meets them and the
-/// pieces on the side of `keep` are kept. The result's history is over `[body]`.
-pub fn trim(body: &Body, tool: &crate::SplitTool, keep: Vec3) -> Result<Body> {
-    body.require_brep("trim")?;
-    let total = body.solid.face_iter().count();
-    let all: Vec<usize> = (0..total).collect();
-    let (split, _) = crate::splitface::split_any(body, &all, tool)?;
-    let side = crate::splitface::side_of_point(tool, keep)?;
-    guard("trim", || {
-        let mut kept = Vec::new();
-        for f in split.solid.face_iter() {
-            let x = crate::splitface::face_side(f, tool, split.size())?;
-            if (x >= 0.0) == (side >= 0.0) {
-                kept.push(f.clone());
-            }
-        }
-        if kept.is_empty() {
-            return Err(KernelError::Invalid("nothing is left on that side of the tool".into()));
-        }
-        // The kept pieces are the split's own; its history carries them back to `body`.
-        let trimmed = rebuilt_body(surface_body(kept), &[&split.solid], &Rebuild::default());
-        Ok(crate::record::after(trimmed, &split, &crate::record::counts(&[body])))
-    })
-}
-
 /// A planar surface extended: the chosen straight edges (picked by points on them) move
 /// outward in the face's plane by `distance`, their neighbours lengthened to meet them. The
 /// result's history is over `[body]`: the face and each edge the one it was moved from.
@@ -1196,7 +1223,7 @@ pub fn extend(body: &Body, at: &[Vec3], distance: f64) -> Result<Body> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{box_solid, cylinder, measure};
+    use crate::{box_solid, cylinder, measure, trim};
     use solidcraft_geom::{Loop2, Vec2};
 
     fn rel(a: f64, b: f64) -> f64 {

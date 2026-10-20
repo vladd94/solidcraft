@@ -1,0 +1,126 @@
+{
+  "format": "solidcraft/28",
+  "format_pending": [
+    "component-metadata",
+    "hole-modeled-thread",
+    "joint-expressions",
+    "joint-origin-edge",
+    "joint-origin-frame-x",
+    "joint-relations",
+    "sketch-point-expressions",
+    "surface-trim-regions-curves-mutual",
+    "two-sided-extrude-direction",
+    "vertex-edge-names"
+  ],
+  "name": "Untitled",
+  "units": "mm",
+  "params": [],
+  "features": [
+    {
+      "id": 1,
+      "name": "Sketch1",
+      "suppressed": false,
+      "type": "sketch",
+      "plane": {
+        "type": "origin",
+        "name": "XY"
+      },
+      "sketch": {
+        "points": [
+          {
+            "id": "origin",
+            "pos": [
+              0.0,
+              0.0
+            ],
+            "fixed": true
+          }
+        ],
+        "curves": [
+          {
+            "id": "c1",
+            "type": "circle",
+            "c": 0,
+            "r": 38.91657744458009,
+            "construction": false
+          }
+        ],
+        "constraints": [],
+        "counters": {
+          "c": 1
+        }
+      }
+    },
+    {
+      "id": 2,
+      "name": "Extrude1",
+      "suppressed": false,
+      "param_names": [
+        "d1"
+      ],
+      "type": "extrude",
+      "sketch": 1,
+      "profiles": {
+        "type": "curves",
+        "loops": [
+          [
+            "c1"
+          ]
+        ]
+      },
+      "extent": {
+        "distance": "10 mm",
+        "convention": "total_distance",
+        "direction": "positive"
+      },
+      "operation": "new_body"
+    },
+    {
+      "id": 3,
+      "name": "Hole1",
+      "suppressed": false,
+      "param_names": [
+        "d2",
+        "d3",
+        "d4"
+      ],
+      "face_names": [
+        "F2:top"
+      ],
+      "type": "hole",
+      "position": [
+        28.083842298344294,
+        0.764851931492899,
+        10.000000000000014
+      ],
+      "direction": [
+        -0.0,
+        -0.0,
+        -1.0
+      ],
+      "diameter": "5 mm",
+      "depth": "10 mm",
+      "hole": {
+        "type": "drilled",
+        "tip_angle": "118 deg"
+      }
+    },
+    {
+      "id": 4,
+      "name": "Thread1",
+      "suppressed": false,
+      "face_names": [
+        "F3:bore:side:1"
+      ],
+      "type": "thread",
+      "face": [
+        30.16610112280314,
+        2.141596046648857,
+        7.366424769492426
+      ],
+      "designation": "M6",
+      "modeled": true
+    }
+  ],
+  "next_id": 5
+}

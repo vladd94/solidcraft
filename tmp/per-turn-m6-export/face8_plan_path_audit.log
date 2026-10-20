@@ -1,0 +1,25 @@
+   Compiling solidcraft-kernel v0.16.2 (/workspace/crates/kernel)
+    Finished `test` profile [optimized + debuginfo] target(s) in 1m 33s
+     Running unittests src/lib.rs (target/debug/deps/solidcraft_kernel-d565376b3e4b5d63)
+
+running 1 test
+=== FACE 8 PLAN-PATH AUDIT ===
+face_h=2.842576 speed=[19.592335905315675, 0.4716990671009225]
+loop pts=272 known_some=0
+wound dirs=[] period=[None, None]
+plan-path UV nodes=272 loops=1
+UV bbox u=[0.029404,0.970596] v=[0.000000,1.000000]
+plan-path UV crossings=0 first=None
+triangulate no-refine: OK
+lattice seeds=0
+triangulate seeds-no-refine: OK
+triangulate seeds+refine+shape: FAIL
+triangulate seeds+refine no-shape: OK
+CAUSE: initial UV loop is simple; sag/shape refinement splits a boundary constraint → triangulate returns None → mislabeled 'boundary crosses itself'
+plan-path 3D min non-adj chord sep=6.173170e-2 mm
+full plan err: the operation failed: not supported yet: tessellation: face 8: boundary crosses itself
+=== END ===
+test helical_thread_tests::audit_face8_uv_self_cross ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 836 filtered out; finished in 1.88s
+

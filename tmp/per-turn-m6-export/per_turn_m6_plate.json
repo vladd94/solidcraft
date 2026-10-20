@@ -1,0 +1,200 @@
+{
+  "format": "solidcraft/28",
+  "format_pending": [
+    "component-metadata",
+    "hole-modeled-thread",
+    "joint-expressions",
+    "joint-origin-edge",
+    "joint-origin-frame-x",
+    "joint-relations",
+    "sketch-point-expressions",
+    "surface-trim-regions-curves-mutual",
+    "two-sided-extrude-direction",
+    "vertex-edge-names"
+  ],
+  "name": "per_turn_m6_plate",
+  "units": "mm",
+  "params": [],
+  "features": [
+    {
+      "id": 1,
+      "name": "Sketch1",
+      "suppressed": false,
+      "type": "sketch",
+      "plane": {
+        "type": "flipped",
+        "base": {
+          "type": "origin",
+          "name": "XZ"
+        }
+      },
+      "sketch": {
+        "points": [
+          {
+            "id": "origin",
+            "pos": [
+              0.0,
+              0.0
+            ],
+            "fixed": true
+          },
+          {
+            "id": "p1",
+            "pos": [
+              0.0,
+              0.0
+            ],
+            "fixed": false
+          },
+          {
+            "id": "p2",
+            "pos": [
+              35.0,
+              0.0
+            ],
+            "fixed": false
+          },
+          {
+            "id": "p3",
+            "pos": [
+              35.0,
+              25.0
+            ],
+            "fixed": false
+          },
+          {
+            "id": "p4",
+            "pos": [
+              0.0,
+              25.0
+            ],
+            "fixed": false
+          }
+        ],
+        "curves": [
+          {
+            "id": "l1",
+            "type": "line",
+            "a": 1,
+            "b": 2,
+            "construction": false
+          },
+          {
+            "id": "l2",
+            "type": "line",
+            "a": 2,
+            "b": 3,
+            "construction": false
+          },
+          {
+            "id": "l3",
+            "type": "line",
+            "a": 3,
+            "b": 4,
+            "construction": false
+          },
+          {
+            "id": "l4",
+            "type": "line",
+            "a": 4,
+            "b": 1,
+            "construction": false
+          }
+        ],
+        "constraints": [
+          {
+            "id": "k1",
+            "type": "horizontal",
+            "l": 0
+          },
+          {
+            "id": "k2",
+            "type": "horizontal",
+            "l": 2
+          },
+          {
+            "id": "k3",
+            "type": "vertical",
+            "l": 1
+          },
+          {
+            "id": "k4",
+            "type": "vertical",
+            "l": 3
+          },
+          {
+            "id": "k5",
+            "type": "coincident",
+            "p": 0,
+            "q": 1
+          }
+        ],
+        "counters": {
+          "k": 5,
+          "l": 4,
+          "p": 4
+        }
+      }
+    },
+    {
+      "id": 2,
+      "name": "Extrude1",
+      "suppressed": false,
+      "param_names": [
+        "d1"
+      ],
+      "type": "extrude",
+      "sketch": 1,
+      "profiles": {
+        "type": "curves",
+        "loops": [
+          [
+            "l1",
+            "l2",
+            "l3",
+            "l4"
+          ]
+        ]
+      },
+      "extent": {
+        "distance": "10 mm",
+        "convention": "total_distance",
+        "direction": "positive"
+      },
+      "operation": "new_body"
+    },
+    {
+      "id": 3,
+      "name": "Hole1",
+      "suppressed": false,
+      "param_names": [
+        "d2",
+        "d3",
+        "d4"
+      ],
+      "face_names": [
+        "F2:top"
+      ],
+      "type": "hole",
+      "position": [
+        24.206461468761468,
+        -10.0,
+        9.567313694413954
+      ],
+      "direction": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "diameter": "4.2 mm",
+      "depth": "10 mm",
+      "hole": {
+        "type": "drilled",
+        "tip_angle": "118 deg"
+      },
+      "thread": "M5x.8",
+      "modeled": true
+    }
+  ],
+  "next_id": 4
+}
