@@ -177,8 +177,9 @@ pub struct ThreadWallSpecs {
     pub audit: TopologyAudit,
 }
 
-/// Build wall FaceSpecs with meridional plane∩ free edges. Runs a static topology audit and
-/// refuses to return specs that have same-direction shared edges or open wires.
+/// Build wall FaceSpecs with meridional plane∩ free edges. Each helical flank is split into
+/// trimmed faces spanning at most one revolution (shared plane∩ mid-seams). Runs a static
+/// topology audit and refuses specs with same-direction shared edges or open wires.
 pub fn internal_thread_wall_face_specs(
     origin: Vec3,
     axis: Vec3,
@@ -214,22 +215,6 @@ pub fn internal_thread_wall_face_specs(
     let a_cl_hi = a_cl_lo + span;
     let a_cu_lo = angle_at_z(z0 + crest_h, pitch, z_lo);
     let a_cu_hi = a_cu_lo + span;
-
-    // Meridional generators: same angle range for each flank pair, with margin past the planes.
-    let margin = 0.25_f64;
-    let lo_a0 = a_fl_lo.min(a_cl_lo) - margin;
-    let lo_a1 = a_fl_hi.max(a_cl_hi) + margin;
-    let up_a0 = a_fu_lo.min(a_cu_lo) - margin;
-    let up_a1 = a_fu_hi.max(a_cu_hi) + margin;
-    let fl_gen = helix_edge(origin, k, u, rc, z0 - foot, pitch, lo_a0, lo_a1)?;
-    let cl_gen = helix_edge(origin, k, u, rm, z0 - crest_h, pitch, lo_a0, lo_a1)?;
-    let fu_gen = helix_edge(origin, k, u, rc, z0 + foot, pitch, up_a0, up_a1)?;
-    let cu_gen = helix_edge(origin, k, u, rm, z0 + crest_h, pitch, up_a0, up_a1)?;
-
-    let fl = helix_edge(origin, k, u, rc, z0 - foot, pitch, a_fl_lo, a_fl_hi)?;
-    let fu = helix_edge(origin, k, u, rc, z0 + foot, pitch, a_fu_lo, a_fu_hi)?;
-    let cl = helix_edge(origin, k, u, rm, z0 - crest_h, pitch, a_cl_lo, a_cl_hi)?;
-    let cu = helix_edge(origin, k, u, rm, z0 + crest_h, pitch, a_cu_lo, a_cu_hi)?;
 
     let flanks = FlankPlaneEdges {
         bot_lower: plane_intersect_flank(origin, k, u, rc, rm, z0 - foot, z0 - crest_h, pitch, z_lo)?,
@@ -279,51 +264,118 @@ pub fn internal_thread_wall_face_specs(
     let mid_a = angle_at_z(z0, pitch, mid_z);
     let flank = 0.5_f64;
 
+    // Split each flank into trimmed faces of at most one revolution so tess::plan's UV CDT
+    // stays simple. Shared mid-seams are the same plane∩ curves used at the entry/exit, at
+    // intermediate axial stations — exact sub-patches of the same ruled surface.
+    let n_seg = ((span / TAU).ceil() as usize).max(1);
+    let margin = 0.25_f64;
+    let mut mid_lower = Vec::with_capacity(n_seg.saturating_sub(1));
+    let mut mid_upper = Vec::with_capacity(n_seg.saturating_sub(1));
+    for i in 1..n_seg {
+        let z = z_lo + (i as f64 / n_seg as f64) * height;
+        mid_lower.push(plane_intersect_flank(origin, k, u, rc, rm, z0 - foot, z0 - crest_h, pitch, z)?);
+        mid_upper.push(plane_intersect_flank(origin, k, u, rc, rm, z0 + foot, z0 + crest_h, pitch, z)?);
+    }
+
+    let mut fl_parts = Vec::with_capacity(n_seg);
+    let mut cl_parts = Vec::with_capacity(n_seg);
+    let mut fu_parts = Vec::with_capacity(n_seg);
+    let mut cu_parts = Vec::with_capacity(n_seg);
+    let mut lower_faces = Vec::with_capacity(n_seg);
+    let mut upper_faces = Vec::with_capacity(n_seg);
+    for i in 0..n_seg {
+        let t0 = i as f64 / n_seg as f64;
+        let t1 = (i + 1) as f64 / n_seg as f64;
+        let (a_fl_0, a_fl_1) = (a_fl_lo + t0 * span, a_fl_lo + t1 * span);
+        let (a_cl_0, a_cl_1) = (a_cl_lo + t0 * span, a_cl_lo + t1 * span);
+        let (a_fu_0, a_fu_1) = (a_fu_lo + t0 * span, a_fu_lo + t1 * span);
+        let (a_cu_0, a_cu_1) = (a_cu_lo + t0 * span, a_cu_lo + t1 * span);
+        if (a_fl_1 - a_fl_0).abs() > TAU + 1e-9 {
+            return Err(KernelError::Failed(format!(
+                "flank segment {i} spans more than one turn ({:.6} rad)",
+                (a_fl_1 - a_fl_0).abs()
+            )));
+        }
+
+        let fl_i = helix_edge(origin, k, u, rc, z0 - foot, pitch, a_fl_0, a_fl_1)?;
+        let cl_i = helix_edge(origin, k, u, rm, z0 - crest_h, pitch, a_cl_0, a_cl_1)?;
+        let fu_i = helix_edge(origin, k, u, rc, z0 + foot, pitch, a_fu_0, a_fu_1)?;
+        let cu_i = helix_edge(origin, k, u, rm, z0 + crest_h, pitch, a_cu_0, a_cu_1)?;
+
+        let lo_a0 = a_fl_0.min(a_cl_0) - margin;
+        let lo_a1 = a_fl_1.max(a_cl_1) + margin;
+        let up_a0 = a_fu_0.min(a_cu_0) - margin;
+        let up_a1 = a_fu_1.max(a_cu_1) + margin;
+        let fl_gen = helix_edge(origin, k, u, rc, z0 - foot, pitch, lo_a0, lo_a1)?;
+        let cl_gen = helix_edge(origin, k, u, rm, z0 - crest_h, pitch, lo_a0, lo_a1)?;
+        let fu_gen = helix_edge(origin, k, u, rc, z0 + foot, pitch, up_a0, up_a1)?;
+        let cu_gen = helix_edge(origin, k, u, rm, z0 + crest_h, pitch, up_a0, up_a1)?;
+
+        let seam_lo_l = if i == 0 { flanks.bot_lower.clone() } else { mid_lower[i - 1].clone() };
+        let seam_hi_l = if i + 1 == n_seg { flanks.top_lower.clone() } else { mid_lower[i].clone() };
+        let seam_lo_u = if i == 0 { flanks.bot_upper.clone() } else { mid_upper[i - 1].clone() };
+        let seam_hi_u = if i + 1 == n_seg { flanks.top_upper.clone() } else { mid_upper[i].clone() };
+
+        let mid_t = 0.5 * (t0 + t1);
+        let mid_z_i = z_lo + mid_t * height;
+        let mid_a_i = angle_at_z(z0, pitch, mid_z_i);
+
+        // Lower: fl → hi∩ → rev(cl) → rev(lo∩). Upper: cu → rev(hi∩) → rev(fu) → lo∩.
+        lower_faces.push(FaceSpec {
+            loops: vec![vec![fl_i.clone(), seam_hi_l, rev(&cl_i), rev(&seam_lo_l)]],
+            surface: SurfSpec::Ruled { a: fl_gen, b: cl_gen },
+            probe: Some((at((rc + rm) / 2.0, mid_a_i, mid_z_i), out(mid_a_i) * flank)),
+        });
+        upper_faces.push(FaceSpec {
+            loops: vec![vec![cu_i.clone(), rev(&seam_hi_u), rev(&fu_i), seam_lo_u]],
+            surface: SurfSpec::Ruled { a: fu_gen, b: cu_gen },
+            probe: Some((at((rc + rm) / 2.0, mid_a_i, mid_z_i), out(mid_a_i) * flank)),
+        });
+        fl_parts.push(fl_i);
+        cl_parts.push(cl_i);
+        fu_parts.push(fu_i);
+        cu_parts.push(cu_i);
+    }
+
     let mut crest_loop: Vec<EdgeSpec> = bot_crest;
-    crest_loop.push(fu.clone());
+    crest_loop.extend(fu_parts.iter().cloned());
     crest_loop.extend(top_crest.iter().rev().map(rev));
-    crest_loop.push(rev(&fl));
+    for e in fl_parts.iter().rev() {
+        crest_loop.push(rev(e));
+    }
 
     let mut root_loop: Vec<EdgeSpec> = bot_root;
-    root_loop.push(cl.clone());
+    root_loop.extend(cl_parts.iter().cloned());
     root_loop.extend(top_root.iter().rev().map(rev));
-    root_loop.push(rev(&cu));
+    for e in cu_parts.iter().rev() {
+        root_loop.push(rev(e));
+    }
 
-    // Lower flank: fl → top∩ → rev(cl) → rev(bot∩). Upper: cu → rev(top∩) → rev(fu) → bot∩.
-    let faces = vec![
-        FaceSpec {
-            loops: vec![crest_loop],
-            surface: SurfSpec::Revolved {
-                a: origin + u * rc + k * z_lo,
-                b: origin + u * rc + k * z_hi,
-                axis_origin: origin,
-                axis: k,
-                angle: TAU,
-            },
-            probe: Some((at(rc, mid_a + PI, mid_z), -out(mid_a + PI))),
+    let mut faces = Vec::with_capacity(2 + 2 * n_seg);
+    faces.push(FaceSpec {
+        loops: vec![crest_loop],
+        surface: SurfSpec::Revolved {
+            a: origin + u * rc + k * z_lo,
+            b: origin + u * rc + k * z_hi,
+            axis_origin: origin,
+            axis: k,
+            angle: TAU,
         },
-        FaceSpec {
-            loops: vec![vec![fl.clone(), flanks.top_lower.clone(), rev(&cl), rev(&flanks.bot_lower)]],
-            surface: SurfSpec::Ruled { a: fl_gen, b: cl_gen },
-            probe: Some((at((rc + rm) / 2.0, mid_a, mid_z), out(mid_a) * flank)),
+        probe: Some((at(rc, mid_a + PI, mid_z), -out(mid_a + PI))),
+    });
+    faces.extend(lower_faces);
+    faces.extend(upper_faces);
+    faces.push(FaceSpec {
+        loops: vec![root_loop],
+        surface: SurfSpec::Revolved {
+            a: origin + u * rm + k * z_lo,
+            b: origin + u * rm + k * z_hi,
+            axis_origin: origin,
+            axis: k,
+            angle: TAU,
         },
-        FaceSpec {
-            loops: vec![vec![cu.clone(), rev(&flanks.top_upper), rev(&fu), flanks.bot_upper.clone()]],
-            surface: SurfSpec::Ruled { a: fu_gen, b: cu_gen },
-            probe: Some((at((rc + rm) / 2.0, mid_a, mid_z), out(mid_a) * flank)),
-        },
-        FaceSpec {
-            loops: vec![root_loop],
-            surface: SurfSpec::Revolved {
-                a: origin + u * rm + k * z_lo,
-                b: origin + u * rm + k * z_hi,
-                axis_origin: origin,
-                axis: k,
-                angle: TAU,
-            },
-            probe: Some((at(rm, mid_a, mid_z), out(mid_a))),
-        },
-    ];
+        probe: Some((at(rm, mid_a, mid_z), out(mid_a))),
+    });
 
     let audit = audit_face_specs(&faces);
     if !audit.wire_closures_ok {

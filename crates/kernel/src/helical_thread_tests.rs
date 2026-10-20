@@ -516,6 +516,64 @@ fn phase_a_wall_tessellates() {
     eprintln!("wall tris={}", mesh.triangles.len());
 }
 
+/// Per-turn flank split experiment: M6×1.0 wall must pass topology, sew ≤90s, and
+/// `tess::plan` without Truck fallback (no UV CDT self-crossing).
+#[test]
+fn per_turn_flank_m6_wall_plan_without_fallback() {
+    use std::time::{Duration, Instant};
+
+    let origin = Vec3::new(20.0, 25.0, 0.0);
+    let major = 6.0_f64;
+    let pitch = 1.0_f64;
+    let height = 10.0_f64;
+    let tap = tap_radius(major, pitch);
+    assert!((tap - 2.5).abs() < 1e-12);
+
+    let t_specs = Instant::now();
+    let specs =
+        crate::internal_thread_wall_face_specs(origin, Vec3::Z, Vec3::X, major, pitch, tap, 0.0, height).expect("wall specs");
+    let specs_ms = t_specs.elapsed();
+    let n_seg = ((height / pitch).ceil() as usize).max(1);
+    eprintln!(
+        "M6 specs {:?}: faces={} (expect crest+root+2*{n_seg}={}) wire_ok={} free={} over={} same_dir={} opp={}",
+        specs_ms,
+        specs.faces.len(),
+        2 + 2 * n_seg,
+        specs.audit.wire_closures_ok,
+        specs.audit.free_edges,
+        specs.audit.overused_edges,
+        specs.audit.same_direction_shares,
+        specs.audit.opposite_direction_shares,
+    );
+    assert!(specs_ms < Duration::from_secs(60), "geometry budget {:?}", specs_ms);
+    assert_eq!(specs.faces.len(), 2 + 2 * n_seg);
+    assert!(specs.audit.wire_closures_ok, "{}", specs.audit.report);
+    assert_eq!(specs.audit.same_direction_shares, 0, "{}", specs.audit.report);
+    assert_eq!(specs.audit.overused_edges, 0, "{}", specs.audit.report);
+
+    let t_sew = Instant::now();
+    let wall = crate::sew_open(&specs.faces).expect("sew open wall");
+    let sew_ms = t_sew.elapsed();
+    eprintln!("M6 sew_open {:?}", sew_ms);
+    assert!(sew_ms < Duration::from_secs(90), "sew budget {:?}", sew_ms);
+    assert_eq!(wall.face_count(), specs.faces.len());
+
+    let t_plan = Instant::now();
+    let plan = crate::tess::plan(&wall.solid, 2e-3, None);
+    let plan_ms = t_plan.elapsed();
+    eprintln!("M6 tess::plan {:?}", plan_ms);
+    let (plan, stats) = plan.expect("tess::plan must succeed without Truck fallback");
+    let tris = plan.evaluate().triangles.len();
+    eprintln!("M6 plan tris={tris} stats={stats:?}");
+    assert!(tris > 0, "plan produced no triangles");
+    assert!(plan_ms < Duration::from_secs(60), "plan budget {:?}", plan_ms);
+
+    let _ = std::fs::create_dir_all("/opt/cursor/artifacts");
+    let step = step_export(&[&wall], "M6 per-turn flank wall").expect("STEP");
+    std::fs::write("/opt/cursor/artifacts/per_turn_m6_wall.step", &step).ok();
+    eprintln!("M6 wall STEP bytes={}", step.len());
+}
+
 /// Investigation: why try_replace stitch hangs while the Phase A fixture succeeds.
 /// No fine tess / volume checks. 90s stitch deadline.
 #[test]
