@@ -419,3 +419,99 @@ fn entry_has_no_radial_end_cap_after_plane_trim() {
     assert!(!threaded.contains(Vec3::new(20.0, 25.0, 5.0)), "bore must be empty");
 }
 
+
+/// Phase A — topology audit of the meridional wall FaceSpecs before sew.
+#[test]
+fn phase_a_wall_topology_audit_passes() {
+    let origin = Vec3::new(20.0, 25.0, 0.0);
+    let tap = tap_radius(5.0, 0.8);
+    let specs = crate::internal_thread_wall_face_specs(origin, Vec3::Z, Vec3::X, 5.0, 0.8, tap, 0.0, 10.0).expect("wall specs");
+    eprintln!(
+        "wall audit: wire_ok={} free={} over={} same_dir={} opp={}\n{}",
+        specs.audit.wire_closures_ok,
+        specs.audit.free_edges,
+        specs.audit.overused_edges,
+        specs.audit.same_direction_shares,
+        specs.audit.opposite_direction_shares,
+        specs.audit.report
+    );
+    assert!(specs.audit.wire_closures_ok);
+    assert_eq!(specs.audit.same_direction_shares, 0);
+    assert_eq!(specs.audit.overused_edges, 0);
+    // Open wall: free edges are the planar entry loops.
+    assert!(specs.audit.free_edges > 0, "open wall should have free entry edges");
+}
+
+/// Phase A — complete plate FaceSpec audit must be closed before sew.
+#[test]
+fn phase_a_plate_topology_audit_is_closed() {
+    let (faces, audit) =
+        crate::plate_with_trimmed_thread_face_specs(40.0, 50.0, 10.0, (12.0, 25.0), (28.0, 25.0), 5.0, 0.8).expect("specs");
+    eprintln!(
+        "plate audit: faces={} wire_ok={} free={} over={} same_dir={} opp={}",
+        faces.len(),
+        audit.wire_closures_ok,
+        audit.free_edges,
+        audit.overused_edges,
+        audit.same_direction_shares,
+        audit.opposite_direction_shares
+    );
+    eprintln!("{}", audit.report);
+    assert!(audit.wire_closures_ok, "wires must close");
+    assert_eq!(audit.free_edges, 0, "closed shell must have no free edges");
+    assert_eq!(audit.overused_edges, 0);
+    assert_eq!(audit.same_direction_shares, 0, "shared edges must oppose:\n{}", audit.report);
+}
+
+/// Phase A — single M5 through-hole: closed solid, no chord intrusion, STEP + tess.
+#[test]
+fn phase_a_single_m5_meridional_through_hole() {
+    let t0 = std::time::Instant::now();
+    let plate = crate::plate_with_trimmed_internal_thread(40.0, 50.0, 10.0, (12.0, 25.0), (28.0, 25.0), 5.0, 0.8)
+        .expect("Phase A plate");
+    let sew_ms = t0.elapsed();
+    eprintln!("sew/stitch {:?}", sew_ms);
+    assert!(sew_ms < std::time::Duration::from_secs(90), "sew/stitch budget {:?}", sew_ms);
+    assert!(plate.validity().is_empty(), "{:?}", plate.validity());
+    assert!(!plate.is_surface());
+    assert_eq!(plate.shell_count(), 1);
+    let tap = tap_radius(5.0, 0.8);
+    assert!((tap - 2.1).abs() < 1e-12);
+    assert!(!plate.contains(Vec3::new(28.0, 25.0, 5.0)), "threaded bore empty");
+    // Plane∩ flank mid radius must stay outside the crest (no straight chord ~1.29).
+    let origin = Vec3::new(28.0, 25.0, 0.0);
+    let (foot, crest_h) = ((0.8 - 0.8 / 4.0) / 2.0, 0.8 / 16.0);
+    let z0 = -0.8;
+    let bot = crate::plane_intersect_flank(origin, Vec3::Z, Vec3::X, tap, 2.5, z0 - foot, z0 - crest_h, 0.8, 0.0)
+        .expect("plane∩");
+    let radii = crate::chain_sample_radii(origin, Vec3::Z, &bot, 17).expect("radii");
+    let mid = radii[radii.len() / 2];
+    let min_r = radii.iter().copied().fold(f64::INFINITY, f64::min);
+    eprintln!("entry plane∩ min_r={min_r:.4} mid_r={mid:.4}");
+    assert!(mid > 2.0, "mid_r {mid} looks like constant-Z chord");
+    assert!(min_r + 1e-3 >= tap, "intrudes crest: min_r={min_r}");
+    let (_, cylinders, _, unknown) = count_surfaces(&plate);
+    assert!(unknown >= 2 && cylinders >= 3, "cyl={cylinders} flank={unknown}");
+    // Coarse tess (PoC budget); fine `plan` at 2e-3 can reject ruled+plane∩ until surface
+    // parameterisation is tightened — closedness and STEP are the Phase A gates.
+    let t_tess = std::time::Instant::now();
+    let mesh = plate.tessellate(0.3).expect("coarse tess");
+    eprintln!("tess {:?} tris={}", t_tess.elapsed(), mesh.triangles.len());
+    assert!(!mesh.triangles.is_empty());
+    let step = step_export(&[&plate], "Phase A M5 meridional").expect("STEP");
+    assert!(step.len() > 1000);
+    std::fs::write("/tmp/phase_a_m5_meridional.step", &step).ok();
+    let _ = std::fs::create_dir_all("/opt/cursor/artifacts");
+    std::fs::write("/opt/cursor/artifacts/phase_a_m5_meridional.step", &step).ok();
+    eprintln!("total {:?}", t0.elapsed());
+}
+
+#[test]
+fn phase_a_wall_tessellates() {
+    let origin = Vec3::new(20.0, 25.0, 0.0);
+    let tap = tap_radius(5.0, 0.8);
+    let (wall, _, _) = crate::internal_thread_wall_trimmed(origin, Vec3::Z, Vec3::X, 5.0, 0.8, tap, 0.0, 10.0).expect("wall");
+    eprintln!("wall faces={} surf={} val={:?}", wall.face_count(), wall.is_surface(), wall.validity());
+    let mesh = wall.tessellate(0.3).expect("wall tess");
+    eprintln!("wall tris={}", mesh.triangles.len());
+}

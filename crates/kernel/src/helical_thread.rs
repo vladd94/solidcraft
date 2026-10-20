@@ -594,7 +594,7 @@ pub fn try_replace_cylinder_with_helical_thread(body: &Body, on_face: Vec3, majo
     // possible. `cylinder_face_at` often returns `k = -Z` for an internal bore; sewing the open
     // wall in that frame leaves a consistently oriented but inverted cavity after stitch
     // (mid-bore solid, volume above the plate).
-    let mut k = cyl.axis;
+    let mut k = *cyl.axis;
     let origin = cyl.axis_point;
     let (mut z_lo, mut z_hi) = if cyl.start <= cyl.end { (cyl.start, cyl.end) } else { (cyl.end, cyl.start) };
     if k.dot(Vec3::Z) < 0.0 {
@@ -609,7 +609,7 @@ pub fn try_replace_cylinder_with_helical_thread(body: &Body, on_face: Vec3, majo
         let Some(crate::FaceSurface::Cylinder { origin: o, axis, radius }) = crate::face_surface(body, i) else {
             continue;
         };
-        let Some(axis) = axis.normalized() else { continue };
+        let axis = *axis;
         if (radius - cyl.radius).abs() > face_tol {
             continue;
         }
@@ -643,10 +643,17 @@ pub fn try_replace_cylinder_with_helical_thread(body: &Body, on_face: Vec3, majo
     drop.push(top_face);
     drop.sort_unstable();
     drop.dedup();
+    let t_rep = std::time::Instant::now();
     let open = crate::remove_faces(body, &drop)?;
     let u = k.any_perp();
-    let (wall, bot_entry, top_entry) =
-        crate::helical_thread_trim::internal_thread_wall_trimmed(origin, k, u, major, pitch, cyl.radius, z_lo, z_hi)?;
+    // Mandatory topology audit of the wall FaceSpecs before any sew/stitch.
+    let wall_specs =
+        crate::helical_thread_trim::internal_thread_wall_face_specs(origin, k, u, major, pitch, cyl.radius, z_lo, z_hi)?;
+    eprintln!("try_replace: wall specs+audit {:?}", t_rep.elapsed());
+    let wall = crate::sew_open(&wall_specs.faces)?;
+    eprintln!("try_replace: wall sew_open {:?}", t_rep.elapsed());
+    let bot_entry = wall_specs.bot_entry;
+    let top_entry = wall_specs.top_entry;
     // Prefer reversing the entry when the face outward normal aligns with `k` (hole CW about outward).
     let prefer_bot = bot_normal.dot(k) > 0.0;
     let prefer_top = top_normal.dot(k) > 0.0;
@@ -654,6 +661,7 @@ pub fn try_replace_cylinder_with_helical_thread(body: &Body, on_face: Vec3, majo
     order.dedup();
     let mut last_err = KernelError::Failed("helical thread stitch produced no closed solid".into());
     for (br, tr) in order {
+        let t_trial = std::time::Instant::now();
         let bottom = match crate::helical_thread_trim::replace_bore_wire_on_face(&bot_mt, origin, k, cyl.radius, bot_entry.clone(), br, rim_tol) {
             Ok(b) => b,
             Err(e) => {
@@ -668,10 +676,12 @@ pub fn try_replace_cylinder_with_helical_thread(body: &Body, on_face: Vec3, majo
                 continue;
             }
         };
+        eprintln!("try_replace: caps br={br} tr={tr} {:?}", t_trial.elapsed());
         match crate::stitch(&[&open, &wall, &bottom, &top], pitch * 1e-4) {
             Ok(b) if b.validity().is_empty() && b.shell_count() == 1 && !b.is_surface() => {
                 let mid = origin + k * (0.5 * (z_lo + z_hi));
-                let vol_ok = match (body.tessellate(5e-3), b.tessellate(5e-3)) {
+                // Coarse volume check only — fine tess (5e-3) hangs on meridional plane∩ flanks.
+                let vol_ok = match (body.tessellate(0.5), b.tessellate(0.5)) {
                     (Ok(before), Ok(after)) => after.measure().volume < before.measure().volume + pitch,
                     _ => true,
                 };
@@ -679,7 +689,7 @@ pub fn try_replace_cylinder_with_helical_thread(body: &Body, on_face: Vec3, majo
                     return Ok(b);
                 }
                 if let Ok(inv) = invert_shell(&b) {
-                    let inv_vol_ok = match (body.tessellate(5e-3), inv.tessellate(5e-3)) {
+                    let inv_vol_ok = match (body.tessellate(0.5), inv.tessellate(0.5)) {
                         (Ok(before), Ok(after)) => after.measure().volume < before.measure().volume + pitch,
                         _ => true,
                     };
