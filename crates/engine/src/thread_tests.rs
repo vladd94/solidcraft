@@ -205,8 +205,63 @@ fn production_m5_modeled_hole_is_curved_brep() {
     assert!(unknown >= 2, "B-spline flanks: {unknown}");
 }
 
-/// Phase 4B: four M5 modeled holes. Drill plain holes first, then thread each wall — drilling a
-/// new hole into a body that already has helical walls can trip the B-rep boolean guard.
+/// Two sequential modeled M5×0.8 Hole features on a 60×60×10 plate (production Path A).
+///
+/// Locks the behaviour verified in `tmp/sequential-hole2/SEQUENTIAL_HOLE2_ROOTCAUSE.md`:
+/// Hole1 modeled → Hole2 modeled keeps a closed curved B-rep. Each Hole runs one bounded
+/// `validity()` inside `try_replace`; this test does not call `validity()` again. Free-edge /
+/// natural-entrance topology is covered by the matching kernel Path A regression.
+#[test]
+fn production_two_sequential_modeled_m5_holes_stay_curved() {
+    use solidcraft_geom::Vec3;
+    use solidcraft_kernel::{face_surface, step_export};
+
+    let centers = [[15.0_f64, 15.0], [45.0, 15.0]];
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 60, "width": 60, "height": 10, "body_name": "Plate"}));
+
+    let mut prev_flanks = 0usize;
+    for (i, c) in centers.iter().enumerate() {
+        // Through-all: omit depth (Hole tool default).
+        run(
+            &mut s,
+            "solid.hole",
+            json!({"position": [c[0], c[1], 10.0], "thread": "M5", "modeled": true}),
+        );
+        let f = s.doc.features.iter().rev().find(|f| matches!(f.kind, crate::doc::FeatureKind::Hole { .. })).expect("hole feature");
+        let crate::doc::FeatureKind::Hole { diameter, modeled, thread, .. } = &f.kind else { panic!("hole") };
+        assert!(*modeled, "Hole{} must be modeled", i + 1);
+        assert_eq!(thread.as_deref(), Some("M5"), "Hole{} designation", i + 1);
+        let (major, pitch) = solidcraft_doc::parse_metric_thread("M5").expect("M5");
+        assert!((major - 5.0).abs() < 1e-12 && (pitch - 0.8).abs() < 1e-12);
+        let got: f64 = diameter.as_str().trim_end_matches(" mm").parse().unwrap();
+        assert!((got - 4.2).abs() < 1e-9, "tap drill {diameter}");
+
+        let body = s.model.state().body("Plate").expect("plate").body.clone();
+        // try_replace already required Closed + empty validity; re-check orientation only.
+        assert!(!body.is_surface() && body.shell_count() == 1, "Hole{}: one closed solid", i + 1);
+        let flanks = (0..body.face_count()).filter(|&fi| face_surface(&body, fi).is_none()).count();
+        assert!(flanks >= 26 * (i + 1), "Hole{}: helical flanks {flanks}", i + 1);
+        assert!(flanks >= prev_flanks, "Hole{}: prior helical faces lost ({flanks} < {prev_flanks})", i + 1);
+        prev_flanks = flanks;
+        for (j, cc) in centers.iter().take(i + 1).enumerate() {
+            assert!(!body.contains(Vec3::new(cc[0], cc[1], 5.0)), "bore {} filled", j + 1);
+        }
+        assert!(body.face_count() < 80, "compact curved B-rep, not facets: {}", body.face_count());
+    }
+
+    let body = s.model.state().body("Plate").expect("plate").body.clone();
+    let step = step_export(&[&body], "two sequential modeled M5").expect("STEP");
+    assert!(step.contains("B_SPLINE_SURFACE"), "curved B-rep in STEP");
+    assert!(!step.contains("FACETED_BREP"), "no faceted substitution");
+}
+
+/// Phase 4B: four M5 modeled holes via the plain-first then modeled-thread order (still supported).
+/// The sequential modeled-Hole Path A (boolean into an already-threaded body) is no longer
+/// inherently blocked for two holes — see `production_two_sequential_modeled_m5_holes_stay_curved`.
+/// Historical Regular-shell stitch failures after cutting into threaded walls are retained as
+/// diagnostics in `tmp/sequential-hole2/`; they are not reproducible on the current tip for the
+/// two-hole case.
 #[test]
 fn production_four_m5_modeled_holes_stay_curved() {
     use solidcraft_kernel::{FaceSurface, cylinder_face_at, face_surface};
