@@ -1200,3 +1200,104 @@ fn per_turn_flank_m6_plate_evidence() {
     eprintln!("{report}");
     assert!(half > aligned, "diametral section peaks look ring-aligned, not half-pitch helical");
 }
+
+/// Display-only shape fallback: M5×0.8 export face 8 must plan without Truck fallback.
+#[test]
+fn m5_export_plan_succeeds_with_shape_fallback() {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let text = std::fs::read_to_string("/workspace/tmp/per-turn-m6-export/per_turn_m6_plate.step").expect("fixture STEP");
+    let body = step_import(&text).expect("import").bodies.remove(0).body;
+    assert_eq!(body.face_count(), 34);
+    assert!(crate::tess::seam::turns_more_than_once(&body.solid));
+
+    let (plan, stats) = crate::tess::plan(&body.solid, 2e-3, None).expect("tess::plan must succeed");
+    assert_eq!(plan.faces.len(), 34, "every face planned");
+    assert!(plan.faces.iter().all(|f| !f.triangles.is_empty()), "no empty face triangulation");
+    let mesh = plan.evaluate();
+    assert!(mesh.triangles.len() > 1_000, "plan mesh has substance: {}", mesh.triangles.len());
+    eprintln!("plan stats={stats:?} tris={}", mesh.triangles.len());
+
+    // Shared edge polylines: every planned edge with two faces is present.
+    let shared = plan.edge_faces.iter().filter(|fs| fs.len() == 2).count();
+    assert!(shared > 20, "shared edges present: {shared}");
+    assert_eq!(plan.edges.len(), plan.edge_faces.len());
+
+    // Helical crest signature (not rings): L-R peak offset ≈ pitch/2.
+    let crest_r = (0..body.face_count())
+        .filter_map(|i| match face_surface(&body, i) {
+            Some(FaceSurface::Cylinder { radius, .. }) => Some(radius),
+            _ => None,
+        })
+        .fold(f64::INFINITY, f64::min);
+    let (origin, k) = (0..body.face_count())
+        .find_map(|i| match face_surface(&body, i) {
+            Some(FaceSurface::Cylinder { origin, axis, radius }) if (radius - crest_r).abs() < 1e-6 => {
+                Some((origin, axis.normalized().unwrap_or(Vec3::Y)))
+            }
+            _ => None,
+        })
+        .expect("crest cylinder");
+    let u0 = if k.cross(Vec3::X).len() > 0.2 { Vec3::X } else { Vec3::Z };
+    let u = (u0 - k * u0.dot(k)).normalized().unwrap_or(Vec3::X);
+    let v = k.cross(u);
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    for p in &mesh.positions {
+        let w = *p - origin;
+        let z = w.dot(k);
+        let rad = w - k * z;
+        let r = rad.len();
+        if !(crest_r - 0.05..crest_r + 0.08).contains(&r) {
+            continue;
+        }
+        if rad.dot(v).abs() > 0.35 {
+            continue;
+        }
+        if rad.dot(u) < -0.05 {
+            left.push((z, r));
+        } else if rad.dot(u) > 0.05 {
+            right.push((z, r));
+        }
+    }
+    let peaks = |pts: &[(f64, f64)]| -> Vec<f64> {
+        let mut bins = vec![f64::INFINITY; 400];
+        for (z, r) in pts {
+            let i = ((*z + 20.0) * 20.0).floor() as isize;
+            if (0..400).contains(&i) {
+                bins[i as usize] = bins[i as usize].min(*r);
+            }
+        }
+        let mut pk = Vec::new();
+        for i in 1..399 {
+            if bins[i].is_finite() && bins[i] < bins[i - 1] && bins[i] < bins[i + 1] {
+                pk.push(i as f64 / 20.0 - 20.0);
+            }
+        }
+        pk
+    };
+    let lp = peaks(&left);
+    let rp = peaks(&right);
+    let mut half = 0usize;
+    let mut aligned = 0usize;
+    for lz in &lp {
+        let best = rp.iter().map(|rz| (rz - lz).abs()).fold(f64::INFINITY, f64::min);
+        if best < 0.15 {
+            aligned += 1;
+        } else if (best - 0.4).abs() < 0.15 {
+            half += 1;
+        }
+    }
+    eprintln!("L-R crest peaks left={} right={} half={} aligned={}", lp.len(), rp.len(), half, aligned);
+    assert!(half > aligned, "plan mesh must look helical (half-pitch L-R), not rings");
+
+    // Body::tessellate must take the plan path (same triangle count class, not truck rings).
+    let display = body.tessellate(2e-3).expect("tessellate");
+    assert_eq!(display.triangles.len(), mesh.triangles.len(), "tessellate uses plan, not Truck fallback");
+
+    // STEP re-export still curved B-rep.
+    let step = step_export(&[&body], "m5 shape fallback").expect("export");
+    assert!(step.contains("B_SPLINE_SURFACE"));
+    assert!(!step.contains("FACETED_BREP"));
+    assert!(Instant::now() < deadline, "90s budget");
+}
