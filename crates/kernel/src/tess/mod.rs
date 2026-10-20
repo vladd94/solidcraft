@@ -358,14 +358,32 @@ fn plan_face(
     }
     // Constrained Delaunay in (u, v) scaled to millimetres: equilateral seeds of side `h`,
     // refined where triangles leave the surface, are too long or bend too much, then shaped by
-    // Ruppert refinement.
+    // Ruppert refinement. When shape refinement would split a shared boundary constraint,
+    // retry once without shape (same seeds, sag budget, and boundary nodes).
     let delaunay = || {
         let polys: Vec<&[[f64; 2]]> = ranges.iter().filter_map(|r| uvs.get(r.clone())).collect();
         let seeds = cdt::lattice(bbox, [h / speed[0], h / speed[1]], &polys, speed);
         let eval = |u: f64, v: f64| s.derivs(u, v).map(|(p, su, sv)| (p, su.cross(sv).normalized()));
-        let sag = cdt::Sag { eval: &eval, tol, h, turn: rules.turn, scale: speed };
-        let fill = cdt::Fill { seeds: &seeds, refine: Some((sag, MAX_REFINE)), shape: !matches!(s, EvalSurface::Plane { .. }) };
-        cdt::triangulate(&uvs, &ranges, fill).ok_or_else(|| fail("boundary crosses itself"))
+        let want_shape = !matches!(s, EvalSurface::Plane { .. });
+        let once = |shape: bool| {
+            let sag = cdt::Sag { eval: &eval, tol, h, turn: rules.turn, scale: speed };
+            cdt::triangulate(&uvs, &ranges, cdt::Fill { seeds: &seeds, refine: Some((sag, MAX_REFINE)), shape })
+        };
+        match once(want_shape) {
+            Ok(mesh) => Ok(mesh),
+            Err(cdt::TriangulateError::BoundaryConstraintSplit) if want_shape => match once(false) {
+                Ok(mesh) => Ok(mesh),
+                Err(e) => Err(fail(e.as_str())),
+            },
+            Err(e) => Err(fail(e.as_str())),
+        }
+        .and_then(|mesh| {
+            if mesh.1.is_empty() {
+                Err(fail("empty triangulation"))
+            } else {
+                Ok(mesh)
+            }
+        })
     };
     // Planar and curved faces alike: a structured grid where the boundary runs along the
     // parameter box (a rectangle, a cylinder half), a Coons grid on four corners, else Delaunay.
@@ -594,8 +612,15 @@ fn plan_pieces(f: &Region) -> Option<(Vec<[f64; 2]>, Vec<[u32; 3]>)> {
                 let polys: Vec<&[[f64; 2]]> = ranges.iter().filter_map(|r| luv.get(r.clone())).collect();
                 let seeds = cdt::lattice(bbox, [f.h / f.speed[0], f.h / f.speed[1]], &polys, f.speed);
                 let eval = |u: f64, v: f64| s.derivs(u, v).map(|(p, su, sv)| (p, su.cross(sv).normalized()));
-                let sag = cdt::Sag { eval: &eval, tol: f.rules.tol, h: f.h, turn: f.rules.turn, scale: f.speed };
-                cdt::triangulate(&luv, &ranges, cdt::Fill { seeds: &seeds, refine: Some((sag, MAX_REFINE)), shape: true })
+                let once = |shape: bool| {
+                    let sag = cdt::Sag { eval: &eval, tol: f.rules.tol, h: f.h, turn: f.rules.turn, scale: f.speed };
+                    cdt::triangulate(&luv, &ranges, cdt::Fill { seeds: &seeds, refine: Some((sag, MAX_REFINE)), shape })
+                };
+                match once(true) {
+                    Ok(mesh) => Some(mesh),
+                    Err(cdt::TriangulateError::BoundaryConstraintSplit) => once(false).ok(),
+                    Err(_) => None,
+                }
             })?;
         let (lextra, ltris) = local;
         let base = u32::try_from(n + extra.len()).ok()?;

@@ -15,7 +15,7 @@ use crate::{Body, KernelError, Result, sew};
 /// Maximum angular span (radians) of one cubic Bézier piece of a helix edge.
 pub const HELIX_PIECE: f64 = TAU / 16.0;
 
-fn basic_h(pitch: f64) -> f64 {
+pub(crate) fn basic_h(pitch: f64) -> f64 {
     pitch * 3.0_f64.sqrt() / 2.0
 }
 
@@ -398,6 +398,7 @@ pub fn plate_with_plain_and_internal_thread(
 }
 
 /// Free edges of a surface body (used once).
+#[allow(dead_code)]
 fn free_truck_edges(body: &Body) -> Vec<truck_modeling::Edge> {
     use truck_modeling as mt;
     let mut uses: std::collections::HashMap<mt::EdgeID, (usize, mt::Edge)> = std::collections::HashMap::new();
@@ -411,6 +412,7 @@ fn free_truck_edges(body: &Body) -> Vec<truck_modeling::Edge> {
 
 /// Rim loop of a cylindrical hole at axial parameter `z` (along `axis` from `origin`), taken from
 /// the body's free edges so stitch can rematch the plate after `remove_faces`.
+#[allow(dead_code)]
 fn free_rim_loop(body: &Body, origin: Vec3, axis: Vec3, r: f64, z: f64, tol: f64) -> Result<Vec<EdgeSpec>> {
     use truck_modeling::{BoundedCurve, ParametricCurve};
     let k = axis.normalized().ok_or_else(|| KernelError::Invalid("rim axis".into()))?;
@@ -467,6 +469,7 @@ fn free_rim_loop(body: &Body, origin: Vec3, axis: Vec3, r: f64, z: f64, tol: f64
 /// Open helical wall for an internal through-hole: crest/root cylinders + ruled B-spline flanks.
 /// Outer free boundaries are the supplied top/bottom rim loops (from the plate after cylinder removal).
 /// `crest` is the hole wall radius (tap drill / minor); root is the major radius.
+#[allow(dead_code)]
 fn internal_thread_wall_open(
     origin: Vec3,
     axis: Vec3,
@@ -558,6 +561,11 @@ fn internal_thread_wall_open(
 /// Replace one internal through-hole cylinder with a curved helical thread wall by
 /// `remove_faces` + `sew_open` + `stitch`. Never falls back to a faceted boolean.
 ///
+/// The helical groove is built as a continuous helix that extends past the plate faces and is
+/// trimmed by those planes: free boundaries are planar entry loops (long crest arc + flanks +
+/// short root). Radial planar end-caps are not added. The planar top/bottom faces are rebuilt so
+/// their hole wires match those entry loops.
+///
 /// Supported today: internal cylindrical through-holes whose radius matches the conventional
 /// tap drill for `(major, pitch)`. Partial-length threads and external shafts return an
 /// explicit error so callers do not silently facet.
@@ -586,7 +594,7 @@ pub fn try_replace_cylinder_with_helical_thread(body: &Body, on_face: Vec3, majo
     // possible. `cylinder_face_at` often returns `k = -Z` for an internal bore; sewing the open
     // wall in that frame leaves a consistently oriented but inverted cavity after stitch
     // (mid-bore solid, volume above the plate).
-    let mut k = cyl.axis;
+    let mut k = *cyl.axis;
     let origin = cyl.axis_point;
     let (mut z_lo, mut z_hi) = if cyl.start <= cyl.end { (cyl.start, cyl.end) } else { (cyl.end, cyl.start) };
     if k.dot(Vec3::Z) < 0.0 {
@@ -601,7 +609,7 @@ pub fn try_replace_cylinder_with_helical_thread(body: &Body, on_face: Vec3, majo
         let Some(crate::FaceSurface::Cylinder { origin: o, axis, radius }) = crate::face_surface(body, i) else {
             continue;
         };
-        let Some(axis) = axis.normalized() else { continue };
+        let axis = *axis;
         if (radius - cyl.radius).abs() > face_tol {
             continue;
         }
@@ -618,22 +626,135 @@ pub fn try_replace_cylinder_with_helical_thread(body: &Body, on_face: Vec3, majo
         let face = crate::surfaces::nearest_face(body, on_face)?;
         bore_faces.push(face);
     }
-    let open = crate::remove_faces(body, &bore_faces)?;
-    let tol = (pitch * 1e-3).max(1e-4);
-    let bot = free_rim_loop(&open, origin, k, cyl.radius, z_lo, tol * 10.0)?;
-    let top = free_rim_loop(&open, origin, k, cyl.radius, z_hi, tol * 10.0)?;
+    let rim_tol = (pitch * 1e-2).max(1e-3);
+    let (bot_face, top_face) = crate::helical_thread_trim::cap_faces_for_bore(body, origin, k, cyl.radius, z_lo, z_hi, rim_tol)?;
+    let bot_mt = body.solid.face_iter().nth(bot_face).cloned().ok_or_else(|| KernelError::Failed("bottom face".into()))?;
+    let top_mt = body.solid.face_iter().nth(top_face).cloned().ok_or_else(|| KernelError::Failed("top face".into()))?;
+    let bot_normal = match crate::face_surface(body, bot_face) {
+        Some(crate::FaceSurface::Plane { normal, .. }) => normal.normalized().unwrap_or(-k),
+        _ => -k,
+    };
+    let top_normal = match crate::face_surface(body, top_face) {
+        Some(crate::FaceSurface::Plane { normal, .. }) => normal.normalized().unwrap_or(k),
+        _ => k,
+    };
+    let mut drop: Vec<usize> = bore_faces;
+    drop.push(bot_face);
+    drop.push(top_face);
+    drop.sort_unstable();
+    drop.dedup();
+    let open = crate::remove_faces(body, &drop)?;
     let u = k.any_perp();
-    let wall = internal_thread_wall_open(origin, k, u, major, pitch, cyl.radius, z_lo, z_hi, bot, top)?;
-    match crate::stitch(&[&open, &wall], pitch * 1e-4) {
-        Ok(b) if b.validity().is_empty() && b.shell_count() == 1 && !b.is_surface() => Ok(b),
-        Ok(b) => Err(KernelError::Failed(format!(
-            "helical thread stitch did not yield a single closed solid (shells={}, surface={}, validity={:?})",
-            b.shell_count(),
-            b.is_surface(),
-            b.validity()
-        ))),
-        Err(e) => Err(KernelError::Failed(format!("helical thread stitch failed: {e}"))),
+    // Mandatory topology audit of the wall FaceSpecs before any sew/stitch.
+    let wall_specs =
+        crate::helical_thread_trim::internal_thread_wall_face_specs(origin, k, u, major, pitch, cyl.radius, z_lo, z_hi)?;
+    let t_sew = std::time::Instant::now();
+    let wall = crate::sew_open(&wall_specs.faces)?;
+    let sew_ms = t_sew.elapsed();
+    let bot_entry = wall_specs.bot_entry;
+    let top_entry = wall_specs.top_entry;
+    // Topology audit of the Boolean remnant vs fixture: free-edge matching is complete
+    // (wall↔caps 8/8). Opposite-parity entry reverses (`br != tr`) leave a Regular open
+    // shell; Truck `validity()` on those opens is extremely expensive (tens of seconds) and
+    // was the perceived "stitch hang". Same-parity reverses close the shell. Prefer those
+    // first; only then try the normal-derived pair.
+    //
+    // Performance: one full `validity()` per newly constructed solid, only after cheap
+    // structural prechecks (`!is_surface`, single shell, empty bore). Never tessellate for
+    // volume here. Budget ~90s (observed closed-shell cost); exceeding it fails loudly.
+    const VALIDITY_BUDGET: std::time::Duration = std::time::Duration::from_secs(90);
+    let prefer_bot = bot_normal.dot(k) > 0.0;
+    let prefer_top = top_normal.dot(k) > 0.0;
+    let mut order = vec![
+        (true, true),
+        (false, false),
+        (prefer_bot, prefer_top),
+        (!prefer_bot, prefer_top),
+        (prefer_bot, !prefer_top),
+        (!prefer_bot, !prefer_top),
+    ];
+    order.dedup();
+    let mut last_err = KernelError::Failed("helical thread stitch produced no closed solid".into());
+    let mid = origin + k * (0.5 * (z_lo + z_hi));
+    let timing = std::env::var_os("SOLIDCRAFT_THREAD_TIMING").is_some();
+    if timing {
+        eprintln!("try_replace: sew_open {sew_ms:?}");
     }
+    for (br, tr) in order {
+        let bottom = match crate::helical_thread_trim::replace_bore_wire_on_face(&bot_mt, origin, k, cyl.radius, bot_entry.clone(), br, rim_tol) {
+            Ok(b) => b,
+            Err(e) => {
+                last_err = e;
+                continue;
+            }
+        };
+        let top = match crate::helical_thread_trim::replace_bore_wire_on_face(&top_mt, origin, k, cyl.radius, top_entry.clone(), tr, rim_tol) {
+            Ok(b) => b,
+            Err(e) => {
+                last_err = e;
+                continue;
+            }
+        };
+        let t_stitch = std::time::Instant::now();
+        let stitched = crate::stitch(&[&open, &wall, &bottom, &top], pitch * 1e-4);
+        let stitch_ms = t_stitch.elapsed();
+        if timing {
+            eprintln!("try_replace: stitch br={br} tr={tr} {stitch_ms:?}");
+        }
+        match stitched {
+            Ok(b) if !b.is_surface() && b.shell_count() == 1 => {
+                // Cheap orientation precheck before the expensive closed-shell validity.
+                let candidate = if !b.contains(mid) {
+                    b
+                } else if let Ok(inv) = invert_shell(&b) {
+                    if inv.is_surface() || inv.shell_count() != 1 || inv.contains(mid) {
+                        last_err = KernelError::Failed("helical thread stitch closed but filled the bore".into());
+                        continue;
+                    }
+                    inv
+                } else {
+                    last_err = KernelError::Failed("helical thread stitch closed but filled the bore".into());
+                    continue;
+                };
+                let t_val = std::time::Instant::now();
+                let bad = candidate.validity();
+                let validity_ms = t_val.elapsed();
+                if timing {
+                    eprintln!("try_replace: validity br={br} tr={tr} {validity_ms:?} issues={}", bad.len());
+                }
+                if validity_ms > VALIDITY_BUDGET {
+                    return Err(KernelError::Failed(format!(
+                        "helical thread validity exceeded budget ({validity_ms:?} > {VALIDITY_BUDGET:?}); shells=1 surface=false issues={bad:?}"
+                    )));
+                }
+                if !bad.is_empty() {
+                    last_err = KernelError::Failed(format!("helical thread stitch closed but validity failed: {bad:?}"));
+                    continue;
+                }
+                return Ok(candidate);
+            }
+            Ok(b) => {
+                // Open / multi-shell: do not call validity() — it stalls on Regular opens.
+                last_err = KernelError::Failed(format!(
+                    "helical thread stitch did not yield a single closed solid (shells={}, surface={})",
+                    b.shell_count(),
+                    b.is_surface()
+                ));
+            }
+            Err(e) => last_err = KernelError::Failed(format!("helical thread stitch failed: {e}")),
+        }
+    }
+    Err(last_err)
+}
+
+fn invert_shell(body: &Body) -> Result<Body> {
+    use truck_modeling as mt;
+    let faces: Vec<mt::Face> = body.solid.face_iter().map(|f| f.inverse()).collect();
+    let shell = mt::Shell::from(faces);
+    if shell.shell_condition() != mt::ShellCondition::Closed {
+        return Err(KernelError::Failed("inverted shell is not closed".into()));
+    }
+    Body::new(mt::Solid::new_unchecked(vec![shell]))
 }
 
 /// External curved helical thread on a shaft cylinder. Not supported yet — returns an explicit

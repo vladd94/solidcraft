@@ -51,8 +51,10 @@ pub mod fuzz;
 mod heal;
 mod helix;
 mod helical_thread;
+mod helical_thread_trim;
 #[cfg(test)]
 mod helical_thread_tests;
+mod helical_meridional_poc;
 pub mod history;
 mod iges_in;
 mod iges_out;
@@ -182,6 +184,12 @@ pub use helical_thread::{
     HELIX_PIECE, external_ridge_thread, helix_approximation_errors, internal_thread_tube, plate_with_plain_and_internal_thread, tap_radius,
     try_replace_cylinder_with_helical_thread, try_replace_external_cylinder_with_helical_thread,
 };
+pub use helical_meridional_poc::chain_sample_radii;
+pub use helical_thread_trim::{
+    TopologyAudit, audit_face_specs, internal_thread_wall_face_specs, internal_thread_wall_trimmed,
+    plate_with_trimmed_internal_thread, plate_with_trimmed_thread_face_specs, plane_intersect_flank,
+};
+
 pub use iges_in::{MAX_IGES_BYTES, iges_import, iges_to_step};
 pub use iges_out::iges_export_bodies;
 pub use lip::{raise_band, rim_band};
@@ -214,8 +222,8 @@ pub use surface_ruled::{Ruled, RuledCorners, RuledMode, ruled_surface};
 pub use surface_trim::{TrimKeep, mutual_trim, trim, trim_keep};
 pub use surface_untrim::{UntrimHoles, untrim};
 pub use surfaces::{
-    copy_faces, extend, extrude_sheet, loft_sheet, patch_edges, patch_region, remove_faces, reverse_faces, revolve_sheet, stitch, sweep_sheet,
-    sweep_sheet_points, sweep_sheet_points_with, sweep_sheet_with, thicken, unstitch,
+    copy_faces, extend, extrude_sheet, loft_sheet, patch_edges, patch_region, remove_faces, reverse_faces, revolve_sheet, stitch, stitch_deadline,
+    sweep_sheet, sweep_sheet_points, sweep_sheet_points_with, sweep_sheet_with, thicken, unstitch,
 };
 pub use sweep_path::{RailFit, SweepControl, SweepOrientation, sweep_path, sweep_path_with};
 pub use topo::{CylinderFace, cylinder_end_at, cylinder_face, cylinder_face_at};

@@ -674,9 +674,6 @@ pub fn cylinder_face_at(b: &Body, p: Vec3) -> Option<CylinderFace> {
         let exact = crate::face_surface(b, face as usize);
         let (off, cyl) = match (surfs.get(face as usize), exact) {
             (_, Some(crate::FaceSurface::Cylinder { origin, axis, radius })) => {
-                let Some(axis) = axis.normalized() else {
-                    continue;
-                };
                 let c = cylinder_extent(&mesh, face, axis, origin, radius);
                 (d.min(c.off(p)), Some(c))
             }

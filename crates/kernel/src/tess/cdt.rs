@@ -52,12 +52,34 @@ pub(crate) struct Fill<'a> {
     pub shape: bool,
 }
 
+/// Why [`triangulate`] refused a face. Callers may retry with `shape: false` only for
+/// [`TriangulateError::BoundaryConstraintSplit`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TriangulateError {
+    /// Non-finite parameters, insert failure, or index overflow.
+    InvalidInput,
+    /// A loop constraint cannot be added (it crosses itself or another loop).
+    CrossingConstraint,
+    /// Sag or Ruppert refinement would split a protected boundary constraint.
+    BoundaryConstraintSplit,
+}
+
+impl TriangulateError {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidInput => "invalid triangulation input",
+            Self::CrossingConstraint => "boundary crosses itself",
+            Self::BoundaryConstraintSplit => "refinement would split a shared boundary",
+        }
+    }
+}
+
 /// Triangulate the region bounded by `loops` (ranges of `boundary`, each closed). Boundary
 /// vertices keep their indices; added points follow. Triangles are counter-clockwise in
-/// (u, v). `None` when a loop cannot be kept as constraints (it crosses itself or another).
-pub(crate) fn triangulate(boundary: &[[f64; 2]], loops: &[std::ops::Range<usize>], fill: Fill) -> Option<(Vec<[f64; 2]>, Vec<[u32; 3]>)> {
+/// (u, v).
+pub(crate) fn triangulate(boundary: &[[f64; 2]], loops: &[std::ops::Range<usize>], fill: Fill) -> Result<(Vec<[f64; 2]>, Vec<[u32; 3]>), TriangulateError> {
     if boundary.iter().flatten().any(|x| !x.is_finite()) {
-        return None;
+        return Err(TriangulateError::InvalidInput);
     }
     let scale = match &fill.refine {
         Some((sag, _)) if sag.scale.iter().all(|k| k.is_finite() && *k > 0.0) => sag.scale,
@@ -71,19 +93,22 @@ pub(crate) fn triangulate(boundary: &[[f64; 2]], loops: &[std::ops::Range<usize>
     let mut index: HashMap<FixedVertexHandle, u32> = HashMap::new();
     let mut handles: Vec<FixedVertexHandle> = Vec::with_capacity(boundary.len());
     for (i, p) in boundary.iter().enumerate() {
-        let h = cdt.insert(to(p)).ok()?;
-        index.entry(h).or_insert(u32::try_from(i).ok()?);
+        let h = cdt.insert(to(p)).map_err(|_| TriangulateError::InvalidInput)?;
+        index.entry(h).or_insert(u32::try_from(i).map_err(|_| TriangulateError::InvalidInput)?);
         handles.push(h);
     }
     for r in loops {
         let n = r.len();
         for k in 0..n {
-            let (a, b) = (*handles.get(r.start + k)?, *handles.get(r.start + (k + 1) % n)?);
+            let (a, b) = (
+                *handles.get(r.start + k).ok_or(TriangulateError::InvalidInput)?,
+                *handles.get(r.start + (k + 1) % n).ok_or(TriangulateError::InvalidInput)?,
+            );
             if a == b || cdt.exists_constraint(a, b) {
                 continue;
             }
             if !cdt.can_add_constraint(a, b) {
-                return None;
+                return Err(TriangulateError::CrossingConstraint);
             }
             cdt.add_constraint(a, b);
         }
@@ -113,7 +138,7 @@ pub(crate) fn triangulate(boundary: &[[f64; 2]], loops: &[std::ops::Range<usize>
         }
         // A split constraint would put a point on the boundary the neighbour does not have.
         if cdt.num_constraints() != constraints {
-            return None;
+            return Err(TriangulateError::BoundaryConstraintSplit);
         }
     }
     let mut uv: Vec<[f64; 2]> = boundary.to_vec();
@@ -129,7 +154,7 @@ pub(crate) fn triangulate(boundary: &[[f64; 2]], loops: &[std::ops::Range<usize>
             *slot = match index.get(&v.fix()) {
                 Some(&i) => i,
                 None => {
-                    let i = u32::try_from(uv.len()).ok()?;
+                    let i = u32::try_from(uv.len()).map_err(|_| TriangulateError::InvalidInput)?;
                     uv.push(from(v.position()));
                     index.insert(v.fix(), i);
                     i
@@ -139,7 +164,7 @@ pub(crate) fn triangulate(boundary: &[[f64; 2]], loops: &[std::ops::Range<usize>
         tris.push(t);
     }
     let extra = uv.split_off(boundary.len());
-    Some((extra, tris))
+    Ok((extra, tris))
 }
 
 /// The band between a face's boundary `loops` (ranges of the first `n` points of `points`) and
@@ -431,7 +456,7 @@ mod tests {
         for refine in [false, true] {
             let refine = refine.then_some((Sag { eval: &flat, tol: 1e-3, h: 0.1, turn: None, scale: [2.0, 1.0] }, 2000));
             let label = refine.is_some();
-            let Some((extra, tris)) = triangulate(&b, &loops, Fill { seeds: &[[0.2, 0.2], [0.5, 0.5]], refine, shape: true }) else {
+            let Ok((extra, tris)) = triangulate(&b, &loops, Fill { seeds: &[[0.2, 0.2], [0.5, 0.5]], refine, shape: true }) else {
                 panic!("meshes")
             };
             let mut uv = b.clone();
@@ -454,7 +479,10 @@ mod tests {
     fn crossing_loops_are_refused() {
         let b = [[0.0, 0.0], [1.0, 1.0], [1.0, 0.0], [0.0, 1.0]];
         let whole = std::slice::from_ref(&(0..4));
-        assert!(triangulate(&b, whole, Fill { seeds: &[], refine: None, shape: false }).is_none());
+        assert_eq!(
+            triangulate(&b, whole, Fill { seeds: &[], refine: None, shape: false }),
+            Err(TriangulateError::CrossingConstraint)
+        );
     }
 
     #[test]
@@ -478,7 +506,7 @@ mod tests {
         // A parameter that is zero in exact arithmetic, left at 1e-300 by projection.
         let b = [[1e-300, 0.0], [1.0, -1e-310], [1.0, 1.0], [0.0, 1.0]];
         let whole = std::slice::from_ref(&(0..4));
-        let Some((extra, tris)) = triangulate(&b, whole, Fill { seeds: &[], refine: None, shape: false }) else { panic!("meshes") };
+        let Ok((extra, tris)) = triangulate(&b, whole, Fill { seeds: &[], refine: None, shape: false }) else { panic!("meshes") };
         assert!(extra.is_empty());
         assert_eq!(tris.len(), 2);
     }
