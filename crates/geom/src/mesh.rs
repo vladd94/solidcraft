@@ -622,6 +622,12 @@ impl Mesh {
 
     /// Point inside a closed mesh (majority vote of three skewed rays).
     pub fn contains(&self, p: Vec3) -> bool {
+        // Rays from outside a helical or thin shell can pick up an odd crossing count; a point
+        // outside the vertex AABB cannot lie in the mesh.
+        let b = self.bounds();
+        if p.x < b.min.x || p.y < b.min.y || p.z < b.min.z || p.x > b.max.x || p.y > b.max.y || p.z > b.max.z {
+            return false;
+        }
         let dirs = [Vec3::new(0.5773, 0.5774, 0.5776), Vec3::new(-0.6123, 0.3141, 0.7254), Vec3::new(0.2718, -0.8414, 0.4673)];
         dirs.iter().filter(|d| self.ray_crossings(p, **d) % 2 == 1).count() >= 2
     }

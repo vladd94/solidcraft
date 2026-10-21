@@ -508,10 +508,36 @@ pub(super) fn rows(app: &mut SolveApp, ctx: &egui::Context, d: &mut Dialog, ui: 
             form_row(ui, "Hole Tap Type", |ui| {
                 let mut tap = usize::from(opts.tapped);
                 combo(ui, "hole_tap", &["Simple", "Tapped"], &mut tap);
-                opts.tapped = tap == 1;
+                let tapped = tap == 1;
+                if opts.tapped && !tapped {
+                    opts.modeled = false;
+                    opts.tap_diameter_override = false;
+                }
+                if !opts.tapped && tapped {
+                    opts.tap_diameter_override = false;
+                    crate::dialogs::sync_tapped_hole_diameter(diameter, &opts.thread);
+                }
+                opts.tapped = tapped;
             });
             if opts.tapped {
+                form_row(ui, "Modeled", |ui| {
+                    ui.checkbox(&mut opts.modeled, "Cut the thread");
+                });
+                let before = opts.thread.clone();
                 enter |= expr_row(ui, "Size", &mut opts.thread);
+                if opts.thread != before && !opts.tap_diameter_override {
+                    crate::dialogs::sync_tapped_hole_diameter(diameter, &opts.thread);
+                }
+                if let Some((major, _)) = solidcraft_engine::doc::parse_metric_thread(&opts.thread) {
+                    form_row(ui, "Nominal Diameter", |ui| {
+                        let label = if (major - major.round()).abs() < 1e-9 {
+                            format!("{} mm", major.round())
+                        } else {
+                            format!("{major} mm")
+                        };
+                        ui.label(label);
+                    });
+                }
             }
             if *kind == 0 {
                 form_row(ui, "Drill Point", |ui| {
@@ -526,7 +552,11 @@ pub(super) fn rows(app: &mut SolveApp, ctx: &egui::Context, d: &mut Dialog, ui: 
             if *kind == 0 && opts.angled {
                 enter |= expr_row(ui, "Tip Angle", &mut opts.tip_angle);
             }
-            enter |= expr_row(ui, "Diameter", diameter);
+            let before = diameter.clone();
+            enter |= expr_row(ui, if opts.tapped { "Tap-Drill Diameter" } else { "Diameter" }, diameter);
+            if opts.tapped && *diameter != before {
+                opts.tap_diameter_override = true;
+            }
             if *kind == 1 {
                 enter |= expr_row(ui, "Counterbore Ø", cb_diameter);
                 enter |= expr_row(ui, "Counterbore depth", cb_depth);

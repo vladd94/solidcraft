@@ -525,11 +525,49 @@ fn plan_face(
     // boundary in turn: Delaunay with sag refinement meshes it (the patch layouts below assume
     // boundary all round, and leave fans across the strip's corners off the surface).
     let seamed = !wound.is_empty();
+    // Seam cuts that wind against the absolute surface (internal holes) or that only succeed
+    // after reversing rim loops need their triangles flipped for a consistent signed volume.
+    let mut seam_sense_flipped = false;
     match wound.as_slice() {
         [] => {}
         [d] => {
             let per = dom.period[*d].unwrap_or(std::f64::consts::TAU);
-            projected = seam::cut(s, &projected, *d, per, rules, h).ok_or_else(|| fail("boundary winds around the surface"))?;
+            // Internal hole walls (inward probe inverts the surface in place) keep sew-compatible
+            // absolute wires that wind against the absolute surface in (u, v). Retry: reverse the
+            // once-around loops (rim circles) first so a helical window keeps its hole sense, then
+            // reverse every loop (#1289 / modelled threads).
+            let cut = match seam::cut(s, &projected, *d, per, rules, h) {
+                Some(cut) => cut,
+                None => {
+                    let mut rim_rev = projected.clone();
+                    for l in &mut rim_rev {
+                        if seam::drift(l, *d, per).abs() > per * 0.5 {
+                            l.uv.reverse();
+                            l.pts.reverse();
+                        }
+                    }
+                    match seam::cut(s, &rim_rev, *d, per, rules, h) {
+                        Some(mut cut) => {
+                            // Rim reverse already flips UV sense relative to the absolute wires.
+                            cut.inverted = !cut.inverted;
+                            cut
+                        }
+                        None => {
+                            let mut all_rev = projected.clone();
+                            for l in &mut all_rev {
+                                l.uv.reverse();
+                                l.pts.reverse();
+                            }
+                            let mut cut = seam::cut(s, &all_rev, *d, per, rules, h)
+                                .ok_or_else(|| fail("boundary winds around the surface"))?;
+                            cut.inverted = !cut.inverted;
+                            cut
+                        }
+                    }
+                }
+            };
+            seam_sense_flipped = cut.inverted;
+            projected = cut.loops;
         }
         _ => return Err(fail("boundary winds around the surface both ways")),
     }
@@ -577,14 +615,32 @@ fn plan_face(
     }
     // Constrained Delaunay in (u, v) scaled to millimetres: equilateral seeds of side `h`,
     // refined where triangles leave the surface, are too long or bend too much, then shaped by
-    // Ruppert refinement.
+    // Ruppert refinement. When shape refinement would split a shared boundary constraint,
+    // retry once without shape (same seeds, sag budget, and boundary nodes).
     let delaunay = || {
         let polys: Vec<&[[f64; 2]]> = ranges.iter().filter_map(|r| uvs.get(r.clone())).collect();
         let seeds = cdt::lattice(bbox, [h / speed[0], h / speed[1]], &polys, speed);
         let eval = |u: f64, v: f64| s.derivs(u, v).map(|(p, su, sv)| (p, su.cross(sv).normalized()));
-        let sag = cdt::Sag { eval: &eval, tol, h, turn: rules.turn, scale: speed };
-        let fill = cdt::Fill { seeds: &seeds, refine: Some((sag, MAX_REFINE)), shape: !matches!(s, EvalSurface::Plane { .. }), lenient: false };
-        cdt::triangulate(&uvs, &ranges, fill).ok_or_else(|| fail("boundary crosses itself"))
+        let want_shape = !matches!(s, EvalSurface::Plane { .. });
+        let once = |shape: bool| {
+            let sag = cdt::Sag { eval: &eval, tol, h, turn: rules.turn, scale: speed };
+            cdt::triangulate(&uvs, &ranges, cdt::Fill { seeds: &seeds, refine: Some((sag, MAX_REFINE)), shape, lenient: false })
+        };
+        match once(want_shape) {
+            Ok(mesh) => Ok(mesh),
+            Err(cdt::TriangulateError::BoundaryConstraintSplit) if want_shape => match once(false) {
+                Ok(mesh) => Ok(mesh),
+                Err(e) => Err(fail(e.as_str())),
+            },
+            Err(e) => Err(fail(e.as_str())),
+        }
+        .and_then(|mesh| {
+            if mesh.1.is_empty() {
+                Err(fail("empty triangulation"))
+            } else {
+                Ok(mesh)
+            }
+        })
     };
     // Planar and curved faces alike: a structured grid where the boundary runs along the
     // parameter box (a rectangle, a cylinder half), a Coons grid on four corners, else Delaunay.
@@ -673,6 +729,11 @@ fn plan_face(
     triangles.retain(|t| !(pole_pair(t[0], t[1]) || pole_pair(t[1], t[2]) || pole_pair(t[2], t[0])));
     if !closed_boundary(&ranges, &fixed, &triangles) {
         return Err(fail("triangulation does not follow the boundary"));
+    }
+    if seam_sense_flipped {
+        for t in &mut triangles {
+            t.swap(1, 2);
+        }
     }
     let mut all = uvs;
     all.extend(extra);
@@ -803,8 +864,15 @@ fn plan_pieces(f: &Region) -> Option<(Vec<[f64; 2]>, Vec<[u32; 3]>)> {
                 let polys: Vec<&[[f64; 2]]> = ranges.iter().filter_map(|r| luv.get(r.clone())).collect();
                 let seeds = cdt::lattice(bbox, [f.h / f.speed[0], f.h / f.speed[1]], &polys, f.speed);
                 let eval = |u: f64, v: f64| s.derivs(u, v).map(|(p, su, sv)| (p, su.cross(sv).normalized()));
-                let sag = cdt::Sag { eval: &eval, tol: f.rules.tol, h: f.h, turn: f.rules.turn, scale: f.speed };
-                cdt::triangulate(&luv, &ranges, cdt::Fill { seeds: &seeds, refine: Some((sag, MAX_REFINE)), shape: true, lenient: false })
+                let once = |shape: bool| {
+                    let sag = cdt::Sag { eval: &eval, tol: f.rules.tol, h: f.h, turn: f.rules.turn, scale: f.speed };
+                    cdt::triangulate(&luv, &ranges, cdt::Fill { seeds: &seeds, refine: Some((sag, MAX_REFINE)), shape, lenient: false })
+                };
+                match once(true) {
+                    Ok(mesh) => Some(mesh),
+                    Err(cdt::TriangulateError::BoundaryConstraintSplit) => once(false).ok(),
+                    Err(_) => None,
+                }
             })?;
         let (lextra, ltris) = local;
         let base = u32::try_from(n + extra.len()).ok()?;

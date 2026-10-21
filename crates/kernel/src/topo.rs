@@ -668,12 +668,20 @@ pub fn cylinder_face_at(b: &Body, p: Vec3) -> Option<CylinderFace> {
     faces.sort_by_key(|(f, _)| *f);
     let mut best: Option<(f64, Option<CylinderFace>)> = None;
     for (face, d) in faces {
-        let (off, cyl) = match surfs.get(face as usize) {
-            Some(Surf::Plane { n, d: k }) => (d.min((n.dot(p) - k).abs()), None),
-            Some(Surf::Cylinder { axis, p: ap, r }) => {
+        // Prefer the body's exact surface when the mesh classifier is unsure (sewn revolute
+        // cylinders). Planes use the mesh distance only: the infinite plane of a small end-cap
+        // would otherwise beat a real cylinder that shares its plane equation.
+        let exact = crate::face_surface(b, face as usize);
+        let (off, cyl) = match (surfs.get(face as usize), exact) {
+            (_, Some(crate::FaceSurface::Cylinder { origin, axis, radius })) => {
+                let c = cylinder_extent(&mesh, face, axis, origin, radius);
+                (d.min(c.off(p)), Some(c))
+            }
+            (Some(Surf::Cylinder { axis, p: ap, r }), _) => {
                 let c = cylinder_extent(&mesh, face, *axis, *ap, *r);
                 (d.min(c.off(p)), Some(c))
             }
+            (Some(Surf::Plane { .. }), _) | (_, Some(crate::FaceSurface::Plane { .. })) => (d, None),
             _ => (d, None),
         };
         if best.as_ref().is_none_or(|(bo, _)| off < *bo) {

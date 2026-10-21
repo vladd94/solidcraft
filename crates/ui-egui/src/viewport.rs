@@ -2073,6 +2073,26 @@ pub(crate) fn build_highlight(app: &SolveApp) -> GpuScene {
             sc.line((p - d * r).to_f32(), (p + d * r).to_f32(), c4(t.construction_geom), 2.0, true);
         }
     }
+    // Cosmetic threads are drawn in the body colour. Shading on the flanks is the thread;
+    // a modeled thread is already the body's own surface and is not listed here.
+    let thread_col = c4(t.body);
+    for thread in &st.threads {
+        let mesh = solidcraft_engine::doc::cosmetic_thread_mesh(thread);
+        for tri in &mesh.triangles {
+            let corners: Vec<(Vec3, Vec3)> = tri
+                .iter()
+                .filter_map(|i| {
+                    let i = *i as usize;
+                    Some((*mesh.positions.get(i)?, *mesh.normals.get(i)?))
+                })
+                .collect();
+            let [a, b, c] = [corners.get(0), corners.get(1), corners.get(2)];
+            let (Some((pa, na)), Some((pb, nb)), Some((pc, nc))) = (a.copied(), b.copied(), c.copied()) else { continue };
+            sc.tri(pa.to_f32(), na.to_f32(), thread_col);
+            sc.tri(pb.to_f32(), nb.to_f32(), thread_col);
+            sc.tri(pc.to_f32(), nc.to_f32(), thread_col);
+        }
+    }
     // Reference widgets follow zoom; the often much larger world-space feedback does not.
     let projected = sel.iter().any(|s| matches!(s, Sel::Profile { .. } | Sel::SketchCurve { .. } | Sel::ExternalSketchCurve { .. }))
         || matches!(hover, Some(Hit::Profile { .. }));

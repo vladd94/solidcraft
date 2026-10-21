@@ -1707,6 +1707,58 @@ fn holes_at_sketch_points_threads_and_components() {
     assert_eq!(reopened.world_state().threads.len(), s.world_state().threads.len());
 }
 
+/// #2115: a tapped hole with no `modeled` flag stays a cosmetic annotation (same solid as a
+/// plain tap-drill hole) and still draws a helix. `modeled: true` cuts the profile, so the
+/// body is no longer that plain hole.
+#[test]
+fn tapped_hole_models_when_asked_and_stays_cosmetic_otherwise() {
+    let plate = |modeled: bool| {
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length": 20, "width": 20, "height": 8}));
+        let mut params = json!({"position": [10.0, 10.0, 8.0], "thread": "M5", "depth": 8});
+        if modeled {
+            params["modeled"] = json!(true);
+        }
+        run(&mut s, "solid.hole", params);
+        s
+    };
+    let mut plain = Session::default();
+    run(&mut plain, "solid.box", json!({"length": 20, "width": 20, "height": 8}));
+    run(&mut plain, "solid.hole", json!({"position": [10.0, 10.0, 8.0], "diameter": 4.2, "depth": 8}));
+    let plain_v = volume(&mut plain);
+
+    let mut cosmetic = plate(false);
+    assert!(rel(volume(&mut cosmetic), plain_v) < 1e-4, "{} vs {plain_v}", volume(&mut cosmetic));
+    let threads = run(&mut cosmetic, "model.threads", json!({}));
+    assert_eq!(threads["threads"].as_array().map(Vec::len), Some(1), "{threads}");
+    let info = cosmetic.model.state().threads.first().cloned().unwrap();
+    let crest = solidcraft_doc::cosmetic_thread_mesh(&info);
+    assert!(crest.triangles.len() > 8, "{}", crest.triangles.len());
+    let axis = info.axis.normalized().unwrap();
+    let radial = |p: solidcraft_geom::Vec3| {
+        let d = p - info.axis_point;
+        (d - axis * d.dot(axis)).len()
+    };
+    let wall = (info.major_diameter - info.pitch) * 0.5;
+    let (mut closest, mut farthest) = (f64::MAX, 0.0_f64);
+    for p in &crest.positions {
+        let r = radial(*p);
+        closest = closest.min(r);
+        farthest = farthest.max(r);
+    }
+    assert!(closest < wall - 0.2, "{closest} vs {wall}");
+    assert!(farthest > wall - 0.15, "{farthest} vs {wall}");
+
+    let mut modeled = plate(true);
+    let modeled_body = modeled.model.state().bodies.first().map(|b| b.body.clone()).expect("body");
+    let faces = modeled_body.face_count();
+    assert!(faces < 80, "modeled tapped hole stays curved B-rep ({faces} faces), not ~4000 facets");
+    assert!(faces > 8, "modeled thread adds helical faces: {faces}");
+    assert!(modeled.model.state().threads.is_empty());
+    let err = modeled.execute("solid.hole", &json!({"position": [2.0, 2.0, 8.0], "diameter": 3.0, "modeled": true})).unwrap_err();
+    assert!(err.to_string().contains("thread"), "{err}");
+}
+
 #[test]
 fn pipe_scale_offset_bounding_and_materials() {
     let mut s = Session::default();
@@ -2576,7 +2628,7 @@ mod naming {
     }
 }
 
-/// Tapped holes take the tap drill (major − pitch); clearance holes the ISO 273 diameter.
+/// Tapped holes take the conventional tap drill; clearance holes the ISO 273 diameter.
 #[test]
 fn tapped_and_clearance_holes() {
     let mut s = Session::default();

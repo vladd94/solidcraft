@@ -386,11 +386,24 @@ pub struct HoleOpts {
     /// Tap type: tapped (a cosmetic thread) instead of simple.
     pub tapped: bool,
     pub thread: String,
+    /// Cut the helical profile. Off for a new tap; an edited hole keeps what it saved.
+    pub modeled: bool,
+    /// The tap-drill diameter was typed by the user; changing the thread size leaves it alone.
+    pub tap_diameter_override: bool,
 }
 
 impl Default for HoleOpts {
     fn default() -> Self {
-        HoleOpts { multiple: false, all: false, angled: true, tip_angle: "118 deg".into(), tapped: false, thread: "M5".into() }
+        HoleOpts {
+            multiple: false,
+            all: false,
+            angled: true,
+            tip_angle: "118 deg".into(),
+            tapped: false,
+            thread: "M5".into(),
+            modeled: false,
+            tap_diameter_override: false,
+        }
     }
 }
 
@@ -2762,6 +2775,23 @@ fn hole_defaults() -> Kind {
     }
 }
 
+/// A metric length as the Hole dialog shows it ("4.2 mm", "5 mm").
+fn show_thread_mm(mm: f64) -> String {
+    if (mm - mm.round()).abs() < 1e-9 {
+        format!("{}", mm.round())
+    } else {
+        format!("{mm}")
+    }
+}
+
+/// Fill the Hole diameter field with the conventional tap drill for `thread`.
+pub(crate) fn sync_tapped_hole_diameter(diameter: &mut String, thread: &str) {
+    if let Some((major, pitch)) = solidcraft_engine::doc::parse_metric_thread(thread) {
+        let drill = solidcraft_engine::doc::tap_drill_diameter(major, pitch);
+        *diameter = format!("{} mm", show_thread_mm(drill));
+    }
+}
+
 /// Start a sketch on a picked plane or planar face and turn the view to face it.
 pub fn start_sketch(app: &mut SolveApp, sel: &Sel) -> Result<(), String> {
     let mut params = match sel {
@@ -3620,6 +3650,9 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
                 }
                 if opts.tapped && !opts.thread.trim().is_empty() {
                     params["thread"] = json!(opts.thread.trim());
+                    if opts.modeled {
+                        params["modeled"] = json!(true);
+                    }
                 }
                 match *kind {
                     1 => {
@@ -4310,7 +4343,7 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
             d.extra.insert("pull".into(), pt3(pull.0));
             d
         }
-        FeatureKind::Hole { position, at, direction, diameter, depth, hole, points, thread, to } => {
+        FeatureKind::Hole { position, at, direction, diameter, depth, hole, points, thread, modeled, to } => {
             let mut d = start("solid.hole")?;
             let mut k = hole_defaults();
             if let Kind::Hole { diameter: dia, depth: dep, kind, cb_diameter, cb_depth, cs_diameter, cs_angle, opts } = &mut k {
@@ -4321,6 +4354,15 @@ pub fn for_feature(app: &SolveApp, id: u64, marker: Option<usize>) -> Option<Dia
                 if let Some(th) = thread {
                     opts.tapped = true;
                     opts.thread = th.clone();
+                    opts.modeled = *modeled;
+                    // A stored bore that is not the conventional tap drill is an explicit override.
+                    if let Some((major, pitch)) = solidcraft_engine::doc::parse_metric_thread(th) {
+                        let drill = solidcraft_engine::doc::tap_drill_diameter(major, pitch);
+                        let want_mm = format!("{} mm", show_thread_mm(drill));
+                        let want_bare = show_thread_mm(drill);
+                        let got = dia.trim();
+                        opts.tap_diameter_override = got != want_mm && got != want_bare;
+                    }
                 }
                 if let Some(dd) = depth {
                     *dep = dd.to_string();

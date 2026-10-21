@@ -52,7 +52,7 @@ pub(crate) fn fill(fi: usize, s: &EvalSurface, loops: &[Vec<Vec3>], accept: f64,
     let plane = Plane::from_normal(centre, normal)?;
     let flat: Vec<[f64; 2]> = fixed.iter().map(|p| plane.to_local(*p)).map(|q| [q.x, q.y]).collect();
     let fill = cdt::Fill { seeds: &[], refine: None, shape: false, lenient: true };
-    let (_, mut triangles) = cdt::triangulate(&flat, &ranges, fill)?;
+    let (_, mut triangles) = cdt::triangulate(&flat, &ranges, fill).ok()?;
     if triangles.is_empty() {
         return None;
     }
