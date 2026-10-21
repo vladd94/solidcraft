@@ -208,7 +208,7 @@ fn internal_thread_display_plan_clears_the_bore() {
     let threaded = try_replace_cylinder_with_helical_thread(&plate, on, 5.0, 0.8).expect("thread");
     assert!(threaded.validity().is_empty(), "{:?}", threaded.validity());
     assert!(crate::tess::seam::turns_more_than_once(&threaded.solid));
-    let (plan, _) = crate::tess::plan(&threaded.solid, 2e-3, None).expect("display plan for internal helical crest");
+    let (plan, _) = crate::tess::plan(&threaded.solid, 2e-3, None, None).expect("display plan for internal helical crest");
     let mesh = plan.evaluate();
     let dir = Vec3::new(0.0, 0.0, -1.0);
     assert!(mesh.raycast(Vec3::new(cx, cy, 12.0), dir).is_none(), "axis must clear the display mesh");
@@ -384,7 +384,7 @@ fn plate_with_trimmed_thread_is_closed_curved() {
     assert!(!b.is_surface());
     let (_, cylinders, _, unknown) = count_surfaces(&b);
     assert!(unknown >= 2 && cylinders >= 3, "cyl={cylinders} flank={unknown}");
-    let (plan, _) = crate::tess::plan(&b.solid, 2e-3, None).expect("display plan");
+    let (plan, _) = crate::tess::plan(&b.solid, 2e-3, None, None).expect("display plan");
     let mesh = plan.evaluate();
     assert!(mesh.raycast(Vec3::new(28.0, 25.0, 12.0), Vec3::new(0.0, 0.0, -1.0)).is_none());
 }
@@ -565,14 +565,14 @@ fn per_turn_flank_m6_wall_plan_without_fallback() {
             per_face_fail.push(format!("face {i}: sew_open failed"));
             continue;
         };
-        match crate::tess::plan(&one.solid, 2e-3, None) {
+        match crate::tess::plan(&one.solid, 2e-3, None, None) {
             Ok(_) => per_face_ok += 1,
             Err(e) => per_face_fail.push(format!("face {i}: {e}")),
         }
     }
 
     let t_plan = Instant::now();
-    let plan = crate::tess::plan(&wall.solid, 2e-3, None);
+    let plan = crate::tess::plan(&wall.solid, 2e-3, None, None);
     let plan_ms = t_plan.elapsed();
     let plan_line = match &plan {
         Ok((p, st)) => format!("OK tris={} stats={st:?}", p.evaluate().triangles.len()),
@@ -1110,7 +1110,7 @@ fn per_turn_flank_m6_plate_evidence() {
     let plate = crate::plate_with_trimmed_internal_thread(40.0, 50.0, 10.0, (12.0, 25.0), (28.0, 25.0), 6.0, 1.0)
         .expect("M6 plate");
     let sew_ms = t0.elapsed();
-    let (plan, stats) = crate::tess::plan(&plate.solid, 2e-3, None).expect("plan");
+    let (plan, stats) = crate::tess::plan(&plate.solid, 2e-3, None, None).expect("plan");
     let mesh = plan.evaluate();
     eprintln!("sew {:?} plan tris={} {stats:?}", sew_ms, mesh.triangles.len());
 
@@ -1211,7 +1211,7 @@ fn m5_export_plan_succeeds_with_shape_fallback() {
     assert_eq!(body.face_count(), 34);
     assert!(crate::tess::seam::turns_more_than_once(&body.solid));
 
-    let (plan, stats) = crate::tess::plan(&body.solid, 2e-3, None).expect("tess::plan must succeed");
+    let (plan, stats) = crate::tess::plan(&body.solid, 2e-3, None, None).expect("tess::plan must succeed");
     assert_eq!(plan.faces.len(), 34, "every face planned");
     assert!(plan.faces.iter().all(|f| !f.triangles.is_empty()), "no empty face triangulation");
     let mesh = plan.evaluate();
