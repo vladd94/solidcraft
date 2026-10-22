@@ -508,10 +508,27 @@ pub(super) fn rows(app: &mut SolveApp, ctx: &egui::Context, d: &mut Dialog, ui: 
             form_row(ui, "Hole Tap Type", |ui| {
                 let mut tap = usize::from(opts.tapped);
                 combo(ui, "hole_tap", &["Simple", "Tapped"], &mut tap);
-                opts.tapped = tap == 1;
+                let tapped = tap == 1;
+                if opts.tapped && !tapped {
+                    opts.modeled = false;
+                    opts.tap_diameter_override = false;
+                    opts.custom_thread = None;
+                }
+                if !opts.tapped && tapped {
+                    opts.tap_diameter_override = false;
+                    crate::dialogs::sync_tapped_hole_diameter(diameter, &opts.thread);
+                }
+                opts.tapped = tapped;
             });
             if opts.tapped {
+                form_row(ui, "Modeled", |ui| {
+                    ui.checkbox(&mut opts.modeled, "Cut the thread");
+                });
+                let before = opts.thread.clone();
                 enter |= crate::dialogs_thread::hole_rows(ui, &app.session.doc, &mut opts.thread, &mut opts.custom_thread);
+                if opts.thread != before && !opts.tap_diameter_override {
+                    crate::dialogs::sync_tapped_hole_diameter(diameter, &opts.thread);
+                }
             }
             if *kind == 0 {
                 form_row(ui, "Drill Point", |ui| {

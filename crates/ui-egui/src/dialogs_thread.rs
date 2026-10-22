@@ -104,7 +104,8 @@ pub(crate) fn hole_rows(ui: &mut egui::Ui, doc: &Document, designation: &mut Str
     form_row(ui, "Tap drill diameter", |ui| {
         match parse_metric_thread(designation).filter(|_| custom.as_ref().is_none_or(|draft| draft.error.is_none())) {
             Some((d, p)) => {
-                ui.label(format!("{:.3} mm", d - p));
+                let drill = solidcraft_engine::doc::tap_drill_diameter(d, p);
+                ui.label(format!("{drill:.3} mm"));
             }
             None => {
                 ui.label(tr("Select size"));

@@ -716,9 +716,12 @@ pub enum FeatureKind {
         /// the holes follow the points when the sketch changes.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         points: Option<SketchPoints>,
-        /// A cosmetic thread in the holes (e.g. "M6x1").
+        /// An ISO metric thread in the holes (e.g. "M6x1"). Cosmetic unless `modeled`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         thread: Option<String>,
+        /// Cut the helical profile into the hole wall. Absent keeps the historical cosmetic thread.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        modeled: bool,
         /// To Object: drill down to the face (or point) here instead of `depth`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         to: Option<FacePick>,

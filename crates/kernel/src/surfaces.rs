@@ -612,6 +612,16 @@ pub(crate) fn nearest_face(body: &Body, p: Vec3) -> Result<usize> {
 /// faces close up. Faces are turned so that neighbours agree. The result's history is over
 /// `bodies`: each face the one it was sewn from, each edge the edges sewn into it.
 pub fn stitch(bodies: &[&Body], tol: f64) -> Result<Body> {
+    stitch_inner(bodies, tol, None)
+}
+
+/// Stitch with optional stage diagnostics and a hard deadline (investigation / hang diagnosis).
+/// When `deadline` elapses, returns `Failed("stitch timed out at <stage>")` without hanging.
+pub fn stitch_deadline(bodies: &[&Body], tol: f64, deadline: std::time::Instant) -> Result<Body> {
+    stitch_inner(bodies, tol, Some(deadline))
+}
+
+fn stitch_inner(bodies: &[&Body], tol: f64, deadline: Option<std::time::Instant>) -> Result<Body> {
     if bodies.is_empty() {
         return Err(KernelError::Invalid("nothing to stitch".into()));
     }
@@ -620,16 +630,35 @@ pub fn stitch(bodies: &[&Body], tol: f64) -> Result<Body> {
     }
     let size = bodies.iter().map(|b| b.size()).fold(0.0, f64::max);
     let tol = if tol.is_finite() && tol > 0.0 { tol } else { size * 1e-6 + 1e-6 };
+    let diag = deadline.is_some() || std::env::var_os("SOLIDCRAFT_STITCH_DIAG").is_some();
+    let t0 = std::time::Instant::now();
+    let check = |stage: &str| -> Result<()> {
+        if diag {
+            eprintln!("stitch[{stage}] elapsed={:?} faces_so_far", t0.elapsed());
+        }
+        if let Some(dl) = deadline {
+            if std::time::Instant::now() >= dl {
+                return Err(KernelError::Failed(format!("stitch timed out at {stage} after {:?}", t0.elapsed())));
+            }
+        }
+        Ok(())
+    };
     guard("stitch", || {
+        check("start")?;
         let faces: Vec<mt::Face> = bodies.iter().flat_map(|b| b.solid.face_iter().cloned().collect::<Vec<_>>()).collect();
+        if diag {
+            eprintln!("stitch[start] input_faces={} tol={tol:.3e}", faces.len());
+        }
         // Shared vertices by position, shared edges by their ends and middle.
         let mut verts: Vec<mt::Vertex> = Vec::new();
         let mut vmap: HashMap<mt::VertexID, mt::Vertex> = HashMap::new();
-        let mut canon = |v: &mt::Vertex, verts: &mut Vec<mt::Vertex>| -> mt::Vertex {
+        let mut canon_scans = 0usize;
+        let mut canon = |v: &mt::Vertex, verts: &mut Vec<mt::Vertex>, scans: &mut usize| -> mt::Vertex {
             if let Some(c) = vmap.get(&v.id()) {
                 return c.clone();
             }
             let p = v.point();
+            *scans += verts.len();
             let c = match verts.iter().find(|u| u.point().distance(p) <= tol) {
                 Some(u) => u.clone(),
                 None => {
@@ -643,16 +672,21 @@ pub fn stitch(bodies: &[&Body], tol: f64) -> Result<Body> {
         let mut edges: Vec<(mt::Edge, mt::Point3)> = Vec::new();
         let mut out = Vec::with_capacity(faces.len());
         let mut rec = Rebuild::default();
-        for f in &faces {
+        let mut edge_lookups = 0usize;
+        for (fi, f) in faces.iter().enumerate() {
+            if fi % 8 == 0 {
+                check(&format!("canon_faces:{fi}/{}", faces.len()))?;
+            }
             let mut wires = Vec::new();
             for w in f.absolute_boundaries() {
                 let mut nw = Vec::new();
                 for e in w.edge_iter() {
                     let abs = if e.orientation() { e.clone() } else { e.inverse() };
-                    let (a, b) = (canon(abs.front(), &mut verts), canon(abs.back(), &mut verts));
+                    let (a, b) = (canon(abs.front(), &mut verts, &mut canon_scans), canon(abs.back(), &mut verts, &mut canon_scans));
                     let c = abs.curve();
-                    let (t0, t1) = c.range_tuple();
-                    let mid = c.subs(0.5 * (t0 + t1));
+                    let (t0p, t1p) = c.range_tuple();
+                    let mid = c.subs(0.5 * (t0p + t1p));
+                    edge_lookups += edges.len();
                     let found = edges.iter().find_map(|(x, m)| {
                         if m.distance(mid) > tol * 10.0 {
                             return None;
@@ -685,6 +719,17 @@ pub fn stitch(bodies: &[&Body], tol: f64) -> Result<Body> {
             rec.whole(&nf, f);
             out.push(nf);
         }
+        if diag {
+            eprintln!(
+                "stitch[canon_done] verts={} edges={} canon_scans≈{} edge_lookups≈{} {:?}",
+                verts.len(),
+                edges.len(),
+                canon_scans,
+                edge_lookups,
+                t0.elapsed()
+            );
+        }
+        check("orient_propagate")?;
         // Neighbours run their shared edges opposite ways.
         let mut uses: HashMap<mt::EdgeID, Vec<(usize, bool)>> = HashMap::new();
         for (i, f) in out.iter().enumerate() {
@@ -713,9 +758,15 @@ pub fn stitch(bodies: &[&Body], tol: f64) -> Result<Body> {
                 }
             }
         }
+        check("body_of")?;
         let out: Vec<mt::Face> = out.into_iter().zip(flip).map(|(f, fl)| if fl == Some(true) { f.inverse() } else { f }).collect();
         let operands: Vec<&mt::Solid> = bodies.iter().map(|b| &*b.solid).collect();
-        body_of(out, &operands, &rec)
+        let body = body_of(out, &operands, &rec)?;
+        check("done")?;
+        if diag {
+            eprintln!("stitch[done] {:?}", t0.elapsed());
+        }
+        Ok(body)
     })
 }
 
