@@ -390,6 +390,8 @@ pub struct HoleOpts {
     pub modeled: bool,
     /// The tap-drill diameter was typed by the user; changing the thread size leaves it alone.
     pub tap_diameter_override: bool,
+    /// Custom nominal diameter and pitch being edited, separate from the saved designation.
+    pub custom_thread: Option<crate::dialogs_thread::HoleThreadDraft>,
 }
 
 impl Default for HoleOpts {
@@ -403,6 +405,7 @@ impl Default for HoleOpts {
             thread: "M5".into(),
             modeled: false,
             tap_diameter_override: false,
+            custom_thread: None,
         }
     }
 }
@@ -864,7 +867,9 @@ impl Dialog {
         }
         *of = picks.to_vec();
         *suggested = picks.first().and_then(|sel| match sel {
-            Sel::Face { point, .. } => solidcraft_engine::doc::suggested_thread(&s.world_state(), *point).ok(),
+            Sel::Face { point, .. } => solidcraft_engine::doc::suggested_thread(&s.world_state(), *point).ok().map(|value| {
+                solidcraft_engine::doc::parse_metric_thread(&value).map(|(d, p)| crate::dialogs_thread::designation(d, p)).unwrap_or(value)
+            }),
             _ => None,
         });
         *designation = suggested.clone().unwrap_or_default();
@@ -962,7 +967,12 @@ impl Dialog {
             }
             Kind::Shell { thickness } => ("Thickness", ValueKind::Length, thickness),
             Kind::Draft { angle } => ("Angle", ValueKind::Angle, angle),
-            Kind::Hole { diameter, .. } => ("Diameter", ValueKind::Length, diameter),
+            Kind::Hole { diameter, opts, .. } => {
+                if opts.tapped {
+                    return None;
+                }
+                ("Diameter", ValueKind::Length, diameter)
+            }
             // A move's main value follows its type: a distance along X for the ones that
             // translate, the angle for Rotate. Point to Point is two picks with nothing to type.
             Kind::Move { mode, x, angle, .. } => match *mode {
@@ -989,12 +999,6 @@ impl Dialog {
             Kind::SketchModify(k) => return k.primary(),
             _ => return None,
         })
-    }
-
-    /// Dialogs holding a table get the wide limit.
-    pub fn is_wide(&self) -> bool {
-        (matches!(self.kind, Kind::PatternRect { .. }) && self.inputs.first().is_some_and(|i| i.accept == selection::FEATURES))
-            || matches!(&self.kind, Kind::Motion(k) if k.wide())
     }
 
     pub fn wants_picks(&self) -> bool {
@@ -2264,7 +2268,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     }
     // Physical materials: the library's, then the design's own (material.create).
     let t = Tokens::get();
-    let vp = crate::shell::content_rect(app, app.viewport.rect.unwrap_or_else(|| ctx.content_rect()));
+    let vp = crate::agent_chat::tool_space(app, crate::shell::content_rect(app, app.viewport.rect.unwrap_or_else(|| ctx.content_rect())));
     // The Sketch Palette owns the right edge for as long as a sketch is being edited. A dialog
     // started there docks at the left instead, so neither panel hides the other.
     let side = if crate::sketch_palette::editing(app) && crate::sketch_palette::fits_beside_a_dialog(app, ctx) {
@@ -2282,7 +2286,8 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     // is open (#1335), kept inside the viewport.
     let moved = crate::frame::dock_offset(ctx, title(&d.kind));
     let docked = egui::pos2(side.anchor_x(vp), top);
-    let anchor = crate::frame::offset_anchor(docked, moved, vp, side);
+    let drag_bounds = crate::shell::tool_drag_rect(app, vp);
+    let anchor = crate::frame::offset_anchor(docked, moved, drag_bounds, side);
     let mut keep = true;
     let mut ok = false;
     let mut applied = false;
@@ -2314,8 +2319,8 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
         Kind::ViewDxf { .. } => ("Export DXF…", "Cancel"),
         _ => ("OK", "Cancel"),
     };
-    let panel =
-        crate::ui_kit::Panel::new(&heading, egui::Id::new(("sc_dialog", title(&d.kind))), anchor, vp, side, frame).actions(ok_label, close_label);
+    let panel = crate::ui_kit::Panel::new(&heading, egui::Id::new(("sc_dialog", title(&d.kind))), anchor, drag_bounds, side, frame)
+        .actions(ok_label, close_label);
     let panel = if matches!(d.kind, Kind::Appearance(_)) {
         panel.width(t.form_card_width + t.form_label_width + t.space_6)
     } else if wide {
@@ -2332,7 +2337,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
     let reset_scroll = d.reset_scroll;
     let panel =
         panel.reset_scroll(reset_scroll && matches!(d.kind, Kind::Appearance(_) | Kind::Motion(crate::dialogs_motion::Mo::Configurations { .. })));
-    let window = panel.window();
+    let window = panel.window(ctx);
     let repeatable =
         matches!(&d.kind, Kind::SketchModify(k) if crate::sketch_modify_ui::repeatable(k)) && d.editing.is_none() && !d.extra.contains_key("pattern");
     if let Kind::ConfirmDelete { with, fail, .. } = &d.kind {
@@ -2353,7 +2358,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
         cancel = closed || action == crate::ui_kit::Action::Cancel;
         app.viewport.dialog_rect = crate::scenario::rect_of("dialog:window");
     } else {
-        let response = window.frame(frame).open(&mut keep).show(ctx, |ui| {
+        let response = window.open(&mut keep).show(ctx, |ui| {
             let spec = dense::command(&d.kind).and_then(solidcraft_engine::find_command);
             let icon = spec.as_ref().map_or("", |s| s.icon);
             let label = spec.as_ref().map_or(heading.as_str(), |s| tr(s.label));
@@ -2452,7 +2457,6 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
         plane["fixed"] = json!(true);
         match app.run("sketch.create", json!({"plane":plane})) {
             Ok(_) => {
-                app.pre_sketch_cam = Some(app.cam);
                 look_at_sketch(app);
                 cancel = true;
                 then_start = d.then_start;
@@ -2804,9 +2808,7 @@ pub fn start_sketch(app: &mut SolveApp, sel: &Sel) -> Result<(), String> {
     {
         params["flip"] = json!(flip);
     }
-    let before = app.cam;
     app.run("sketch.create", params).map_err(|error| crate::friendly_error("sketch.create", &error))?;
-    app.pre_sketch_cam = Some(before);
     look_at_sketch(app);
     // On a face: look at the picked point, not the plane's origin (a corner of the face),
     // which left the face filling the view off-centre like a big square.
@@ -3638,7 +3640,9 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
             let mut out = Vec::new();
             for place in places {
                 let mut params = place;
-                params["diameter"] = json!(diameter);
+                if !opts.tapped {
+                    params["diameter"] = json!(diameter);
+                }
                 params["type"] = json!(ty);
                 if to_object_on(&d.inputs) {
                     params["to"] = to_object_point(&d.inputs).ok_or("select the object to drill to")?;
@@ -3648,7 +3652,11 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
                 if ty == "drilled" {
                     params["tip_angle"] = json!(opts.tip_angle);
                 }
-                if opts.tapped && !opts.thread.trim().is_empty() {
+                if opts.tapped {
+                    if let Some(error) = opts.custom_thread.as_ref().and_then(|draft| draft.error.as_ref()) {
+                        return Err(error.clone());
+                    }
+                    solidcraft_engine::doc::parse_metric_thread(&opts.thread).ok_or("select a valid metric thread size")?;
                     params["thread"] = json!(opts.thread.trim());
                     if opts.modeled {
                         params["modeled"] = json!(true);

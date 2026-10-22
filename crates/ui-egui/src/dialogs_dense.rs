@@ -512,6 +512,7 @@ pub(super) fn rows(app: &mut SolveApp, ctx: &egui::Context, d: &mut Dialog, ui: 
                 if opts.tapped && !tapped {
                     opts.modeled = false;
                     opts.tap_diameter_override = false;
+                    opts.custom_thread = None;
                 }
                 if !opts.tapped && tapped {
                     opts.tap_diameter_override = false;
@@ -524,19 +525,9 @@ pub(super) fn rows(app: &mut SolveApp, ctx: &egui::Context, d: &mut Dialog, ui: 
                     ui.checkbox(&mut opts.modeled, "Cut the thread");
                 });
                 let before = opts.thread.clone();
-                enter |= expr_row(ui, "Size", &mut opts.thread);
+                enter |= crate::dialogs_thread::hole_rows(ui, &app.session.doc, &mut opts.thread, &mut opts.custom_thread);
                 if opts.thread != before && !opts.tap_diameter_override {
                     crate::dialogs::sync_tapped_hole_diameter(diameter, &opts.thread);
-                }
-                if let Some((major, _)) = solidcraft_engine::doc::parse_metric_thread(&opts.thread) {
-                    form_row(ui, "Nominal Diameter", |ui| {
-                        let label = if (major - major.round()).abs() < 1e-9 {
-                            format!("{} mm", major.round())
-                        } else {
-                            format!("{major} mm")
-                        };
-                        ui.label(label);
-                    });
                 }
             }
             if *kind == 0 {
@@ -552,10 +543,8 @@ pub(super) fn rows(app: &mut SolveApp, ctx: &egui::Context, d: &mut Dialog, ui: 
             if *kind == 0 && opts.angled {
                 enter |= expr_row(ui, "Tip Angle", &mut opts.tip_angle);
             }
-            let before = diameter.clone();
-            enter |= expr_row(ui, if opts.tapped { "Tap-Drill Diameter" } else { "Diameter" }, diameter);
-            if opts.tapped && *diameter != before {
-                opts.tap_diameter_override = true;
+            if !opts.tapped {
+                enter |= expr_row(ui, "Diameter", diameter);
             }
             if *kind == 1 {
                 enter |= expr_row(ui, "Counterbore Ø", cb_diameter);
