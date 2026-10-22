@@ -1,0 +1,7 @@
+[
+  {"command": "solid.box", "params": {"length": 100, "width": 100, "height": 10, "body_name": "Plate"}},
+  {"command": "solid.hole", "params": {"position": [25, 25, 10], "thread": "M5x0.8", "modeled": true}},
+  {"command": "solid.hole", "params": {"position": [75, 25, 10], "thread": "M6x0.9", "modeled": true}},
+  {"command": "solid.hole", "params": {"position": [25, 75, 10], "thread": "M5x0.75", "modeled": true}},
+  {"command": "solid.hole", "params": {"position": [75, 75, 10], "thread": "M6x0.8", "modeled": true}}
+]

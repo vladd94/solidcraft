@@ -1,0 +1,102 @@
+{
+  "results": [
+    {
+      "bodies": [
+        "Plate"
+      ],
+      "changed_bodies": [],
+      "created_bodies": [
+        "Plate"
+      ],
+      "feature": 1,
+      "ms": 2.274091,
+      "name": "Box1",
+      "removed_bodies": [],
+      "warning": null
+    },
+    {
+      "bodies": [
+        "Plate"
+      ],
+      "changed_bodies": [
+        "Plate"
+      ],
+      "created_bodies": [],
+      "feature": 2,
+      "ms": 5376.5590760000005,
+      "name": "Hole1",
+      "removed_bodies": [],
+      "warning": null
+    },
+    {
+      "bodies": [
+        "Plate"
+      ],
+      "changed_bodies": [
+        "Plate"
+      ],
+      "created_bodies": [],
+      "feature": 3,
+      "ms": 12679.4157,
+      "name": "Hole2",
+      "removed_bodies": [],
+      "warning": null
+    },
+    {
+      "bodies": [
+        "Plate"
+      ],
+      "changed_bodies": [
+        "Plate"
+      ],
+      "created_bodies": [],
+      "feature": 4,
+      "ms": 22124.06274,
+      "name": "Hole3",
+      "removed_bodies": [],
+      "warning": null
+    },
+    {
+      "bodies": [
+        "Plate"
+      ],
+      "changed_bodies": [
+        "Plate"
+      ],
+      "created_bodies": [],
+      "feature": 5,
+      "ms": 27836.978563,
+      "name": "Hole4",
+      "removed_bodies": [],
+      "warning": null
+    }
+  ],
+  "timings": [
+    {
+      "command": "solid.box",
+      "index": 0,
+      "ms": 3.73
+    },
+    {
+      "command": "solid.hole",
+      "index": 1,
+      "ms": 5377.614
+    },
+    {
+      "command": "solid.hole",
+      "index": 2,
+      "ms": 12987.384
+    },
+    {
+      "command": "solid.hole",
+      "index": 3,
+      "ms": 22844.863
+    },
+    {
+      "command": "solid.hole",
+      "index": 4,
+      "ms": 29200.81
+    }
+  ],
+  "total_ms": 70414.598
+}
