@@ -3,10 +3,12 @@
 //! as STL (binary or ASCII), OBJ, STEP and 3MF, and assemblies as URDF ([`urdf()`]); STEP, IGES,
 //! FreeCAD and Rhino files import as a base feature (see [`step_import_feature`]), 3MF and
 //! STL files as mesh bodies (see [`mesh_import_feature`]), PLY and XYZ files as point clouds
-//! (see [`read_point_cloud`]).
+//! (see [`read_point_cloud`]), and KiCad boards as a mesh substrate with referenced STEP
+//! component models.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
+mod airfoil;
 pub mod catalog;
 mod design;
 pub mod design_lock;
@@ -45,6 +47,7 @@ mod threemf;
 pub mod urdf;
 pub mod vfs;
 
+pub use airfoil::{Airfoil, AirfoilFormat, MAX_AIRFOIL_BYTES, MAX_AIRFOIL_POINTS, read_airfoil};
 pub use dxf::{DxfWriteOptions, read_dxf, write_dxf, write_dxf_entities, write_dxf_opts};
 pub use dxf_out::{
     DxfEntity, DxfLayer, DxfLinetype, DxfShape, loop_lwpolyline, loop_lwpolyline_scaled, loop_shapes, seg_shape, write_dxf_drawing,
@@ -56,12 +59,20 @@ pub use sketch2d::{Geom2, MAX_DRAWING_BYTES};
 pub use svg::{decode_svg, read_svg, svg_nothing_to_import, svg_sheet};
 mod gltf_in;
 pub use gltf_in::{GltfImport, Loader, MAX_GLTF_BYTES, MeshPlan, PlanPlace, glb_container, is_gltf_path, read_gltf};
+mod kicad_in;
+pub use kicad_in::{
+    DEFAULT_BOARD_COLOR, KicadBoard, KicadCopper, KicadDrill, KicadFootprint, KicadImport, KicadLoader, KicadModel, KicadModelFile, KicadOptions,
+    KicadPad, KicadRepresentation, KicadStroke, KicadText, KicadVia, KicadZone, MAX_KICAD_BYTES, is_kicad_path, kicad_board_mesh, kicad_board_path,
+    kicad_board_thickness, parse_kicad_board, parse_kicad_board_with, read_kicad,
+};
 mod obj;
 pub use obj::read_obj;
 pub use threemf::{
     MAX_3MF_BYTES, MeshObject, model_xml, model_xml_parts, model_xml_with, read_3mf, weld, write_3mf, write_3mf_parts, write_3mf_with,
 };
 pub use urdf::{UrdfOptions, UrdfPackage, urdf};
+mod vrml_in;
+pub use vrml_in::{MAX_VRML_BYTES, VrmlMesh, is_vrml_path, read_vrml};
 
 use solidcore_record::Vec3;
 use solidcraft_doc::{Document, Metadata, ModelState};
@@ -202,6 +213,8 @@ pub struct StepFeature {
     pub kind: solidcraft_doc::FeatureKind,
     /// Body names from the file, as [`StepNames`] chose them (automatic by default).
     pub body_names: Vec<String>,
+    /// By body, whether the file marks it invisible: the design starts with it hidden.
+    pub invisible: Vec<bool>,
     pub warnings: Vec<String>,
     /// The file as read. Hold it until the feature has been evaluated: the timeline then reuses
     /// it instead of reading the file again (it is freed with the last holder).
@@ -278,6 +291,8 @@ pub fn step_import_feature_named(bytes: &[u8], file: &str, names: StepNames) -> 
     let hidden = hidden_items(file, bytes, &text);
     let skip: Vec<u64> = imp.bodies.iter().zip(0u64..).filter(|(b, _)| hidden.contains(&b.source_item)).map(|(_, i)| i).collect();
     let skip = if skip.len() == imp.bodies.len() { Vec::new() } else { skip };
+    // A body the STEP file itself marks invisible is still built, and starts hidden.
+    let invisible: Vec<bool> = imp.bodies.iter().map(|b| b.hidden).collect();
     // The root product's name; else the only body's name; else the file name.
     let name = match (imp.tree.as_slice(), body_names.as_slice()) {
         ([root], _) if !generic_name(&root.name) => root.name.clone(),
@@ -288,6 +303,7 @@ pub fn step_import_feature_named(bytes: &[u8], file: &str, names: StepNames) -> 
     Ok(StepFeature {
         name,
         body_names,
+        invisible,
         kind: solidcraft_doc::FeatureKind::Import { file: file_name, step: text.into(), components: imp.tree.clone(), skip },
         warnings: iges_warnings.into_iter().chain(imp.warnings.iter().cloned()).collect(),
         import: imp,
